@@ -425,7 +425,7 @@ def run_streamlit_app() -> None:
     init_db()
 
     # Session defaults
-    for key, val in {"text_ids": [], "current_text_index": 1, "audio_bytes": None, "user_id": None, "username": None, "authenticated": False, "is_admin": False}.items():
+    for key, val in {"text_ids": [], "current_text_index": 0, "audio_bytes": None, "user_id": None, "username": None, "authenticated": False, "is_admin": False}.items():
         st.session_state.setdefault(key, val)
 
     # Authentication UI
@@ -524,6 +524,42 @@ def run_streamlit_app() -> None:
     # Sidebar configuration
     # Sidebar (ONLY visible after login)
     if st.session_state.get("authenticated", False):
+
+# -----------------------------------
+# DARK THEME (applies only after login)
+# -----------------------------------
+        st.markdown("""
+            <style>
+                body {
+                    background-color: #1e1e1e !important;
+                }
+                .main .block-container {
+                    background-color: #1e1e1e !important;
+                    color: white !important;
+                }
+                .main {
+                    background-color: #1e1e1e !important;
+                }
+                header, footer {
+                    background: #1e1e1e !important;
+                }
+                h1, h2, h3, h4, h5, h6,
+                p, div, span, label {
+                    color: white !important;
+                }
+                /* Buttons */
+                .stButton > button {
+                    background-color: #444 !important;
+                    color: white !important;
+                    border-radius: 6px !important;
+                    font-weight: 600 !important;
+                }
+                .stButton > button:hover {
+                    background-color: #666 !important;
+                }
+            </style>
+        """, unsafe_allow_html=True)
+
 
         with st.sidebar:
 
@@ -641,6 +677,33 @@ def run_streamlit_app() -> None:
                 else:
                     st.info(f"Language: **{st.session_state['chosen_language']}**")
                     
+        # -----------------------------------
+        # DARK THEME (applies only after login)
+        # -----------------------------------
+        st.markdown("""
+            <style>
+                .main .block-container {
+                    background-color: #1e1e1e !important;
+                    color: white !important;
+                }
+                .main {
+                    background-color: #1e1e1e !important;
+                }
+                h1, h2, h3, h4, h5, h6,
+                p, div, span {
+                    color: white !important;
+                }
+                .stMarkdown, .stText {
+                    color: white !important;
+                }
+                /* Buttons */
+                .stButton > button {
+                    border-radius: 6px !important;
+                    font-weight: 600 !important;
+                }
+            </style>
+        """, unsafe_allow_html=True)
+
 
         # ---- FIRST-TIME LANGUAGE SELECTION (MAIN AREA) ----
         if st.session_state.get("authenticated", False) and not st.session_state.get("is_admin", False):
@@ -680,60 +743,6 @@ def run_streamlit_app() -> None:
                 # IMPORTANT: stop here so main UI doesn't render until language is set
                 return
 
-
-
-    # Main UI with dark background
-    st.markdown("""
-        <style>
-            .main .block-container {
-                background-color: #1e1e1e;
-                color: white;
-            }
-            .main {
-                background-color: #1e1e1e;
-            }
-            h1, h2, h3, h4, h5, h6 {
-                color: white !important;
-            }
-            p, div, span {
-                color: white;
-            }
-            .stMarkdown {
-                color: white;
-            }
-            .stButton > button[data-testid="submit-btn"] {
-                    background-color: #218838 !important;
-                    border: none !important;
-                    color: #fff !important;
-                    font-weight: 600;
-                    font-size: 18px;
-                    border-radius: 6px;
-                    width: 100%;
-                    padding: 12px;
-                    margin-bottom: 12px;
-            }
-            .stButton > button[data-testid="submit-btn"]:hover, 
-            .stButton > button[data-testid="submit-btn"]:active {
-                background-color: #28a745 !important;
-            }
-        </style>
-    """, unsafe_allow_html=True)
-    if st.session_state.get("authenticated", False):
-        st.markdown(
-            "<h1 style='text-align: center; color: white;'>datagen_v2</h1>",
-            unsafe_allow_html=True
-        )
-        st.markdown("---")
-
-# --- Section 2 End ---
-
-## --- Section 3 Start ---
-
-    # Sidebar: Admin upload (with language choice), User language dropdown
-    with st.sidebar:
-        admin = st.session_state.get("is_admin", False)
-        st.markdown("---")
- 
     # Main prompt UI as before, but the prompts are now filtered by chosen language
     if st.session_state.get("text_ids"):
 
