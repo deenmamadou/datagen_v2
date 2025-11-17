@@ -6,9 +6,8 @@ A Streamlit application for displaying Arabic and other right-to-left (RTL) lang
 
 - ✅ **RTL Language Support**: Properly displays Arabic, Hebrew, Persian, Urdu, and other RTL languages
 - ✅ **Text Database**: SQLite database for storing and managing texts
-- ✅ **Text Shuffling**: Randomly shuffle through texts for practice
+- ✅ **uploads to S3**: upon user submission of a recording, the audio uploads to the cloud in text/audio pairs
 - ✅ **Audio Recording**: Built-in audio recorder for capturing user readings
-- ✅ **Hoppepper Integration**: Upload recordings to Hoppepper for human transcription
 - ✅ **Recording History**: Track all recordings per text
 
 ## Installation
@@ -56,14 +55,6 @@ The app uses SQLite with two main tables:
 - **texts**: Stores text content, language, and RTL flag
 - **recordings**: Stores audio file paths, Hoppepper job IDs, and status
 
-## Hoppepper Integration
-
-The app integrates with Hoppepper API for transcription services. When you upload a recording:
-
-1. Audio file is saved locally
-2. File is uploaded to Hoppepper via API
-3. Job ID is stored in the database
-4. Status is tracked for each recording
 
 ## Customization
 
