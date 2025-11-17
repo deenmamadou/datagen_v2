@@ -1,4 +1,4 @@
-# RTL Language Transcription App
+# datagen_v2 App
 
 A Streamlit application for displaying Arabic and other right-to-left (RTL) languages, with audio recording capabilities and integration with Hoppepper transcription platform.
 
