@@ -807,7 +807,7 @@ def run_streamlit_app() -> None:
                             }
 
                             // Increase silence auto-stop timeout (milliseconds)
-                            recorder.VAD_SILENCE_TIMEOUT = 2200;   // ← adjust this
+                            recorder.VAD_SILENCE_TIMEOUT = 44000;   // ← adjust this
                             console.log("Updated VAD silence timeout:", recorder.VAD_SILENCE_TIMEOUT);
                         }
                         extendSilenceTimeout();
