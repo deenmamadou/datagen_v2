@@ -771,7 +771,7 @@ def run_streamlit_app() -> None:
                 f"Recording {st.session_state['current_text_index'] + 1} of {len(st.session_state['text_ids'])}"
             )
             st.markdown(
-                f"<div style='direction:{'rtl' if is_rtl else 'ltr'}; text-align:{'right' if is_rtl else 'left'}; font-size:24px; padding:20px; background:#2d2d2d; color:#ffffff; border-radius:10px; margin:20px 0;'>{text}</div>",
+                f"<div style='direction:{'rtl' if is_rtl else 'ltr'}; text-align:{'right' if is_rtl else 'left'}; font-size:34px; padding:20px; background:#2d2d2d; color:#ffffff; border-radius:10px; margin:20px 0;'>{text}</div>",
                 unsafe_allow_html=True,
             )
             st.markdown("---")
