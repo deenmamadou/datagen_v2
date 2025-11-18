@@ -790,28 +790,44 @@ def run_streamlit_app() -> None:
                 col1, col2, col3 = st.columns([3, 2, 1.5])
                 with col2:
                     # No extra HTML around the widget, just the widget call:
-                    from custom_recorder.recorder import audio_recorder_5s
-
-                    audio_bytes = audio_recorder_5s(key="rec1")
-                    if audio_bytes:
-                        audio_bytes = bytes(audio_bytes)  # convert JS list → bytes
-
-                    st.markdown("""
+                    audio_bytes = audio_recorder(
+                        text="",  # no label, icon only
+                        recording_color="#e74c3c",
+                        neutral_color="#6c757d",
+                        icon_name="microphone",
+                        icon_size="6x",
+                    )
+                    st.markdown(st.markdown("""
                     <script>
-                        function extendSilenceTimeout() {
-                            const recorder = window.streamlitAudioRecorder;
-                            if (!recorder) {
-                                setTimeout(extendSilenceTimeout, 300);
-                                return;
-                            }
-
-                            // Increase silence auto-stop timeout (milliseconds)
-                            recorder.VAD_SILENCE_TIMEOUT = 44000;   // ← adjust this
-                            console.log("Updated VAD silence timeout:", recorder.VAD_SILENCE_TIMEOUT);
+                    function disableSilenceAutoStop() {
+                        const rec = window.streamlitAudioRecorder;
+                        if (!rec || !rec.mediaRecorder) {
+                            setTimeout(disableSilenceAutoStop, 300);
+                            return;
                         }
-                        extendSilenceTimeout();
+
+                        console.log("🔧 Disabling silence auto-stop…");
+
+                        // Disable any silence timers the plugin uses
+                        rec.VAD_SILENCE_TIMEOUT = 999999;  
+                        rec.SILENCE_DELAY = 999999;
+
+                        // Patch stop() so silence does NOT trigger it
+                        rec._originalStop = rec.mediaRecorder.stop;
+                        rec.mediaRecorder.stop = function() {
+                            console.log("MediaRecorder stop() was called — ignoring (patch active)");
+                            // Do nothing (prevent silence stopping)
+                        };
+
+                        // Also block plugin’s own auto-stop function
+                        rec.stop = function() {
+                            console.log("Recorder stop() suppressed.");
+                        };
+                    }
+                    disableSilenceAutoStop();
                     </script>
                     """, unsafe_allow_html=True)
+, unsafe_allow_html=True)
 
 
                     is_disabled = "true" if is_at_end else "false"
