@@ -790,13 +790,12 @@ def run_streamlit_app() -> None:
                 col1, col2, col3 = st.columns([3, 2, 1.5])
                 with col2:
                     # No extra HTML around the widget, just the widget call:
-                    audio_bytes = audio_recorder(
-                        text="",  # no label, icon only
-                        recording_color="#e74c3c",
-                        neutral_color="#6c757d",
-                        icon_name="microphone",
-                        icon_size="6x",
-                    )
+                    from custom_recorder.recorder import audio_recorder_5s
+
+                    audio_bytes = audio_recorder_5s(key="rec1")
+                    if audio_bytes:
+                        audio_bytes = bytes(audio_bytes)  # convert JS list → bytes
+
                     st.markdown("""
                     <script>
                         function extendSilenceTimeout() {

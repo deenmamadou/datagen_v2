@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8" />
+<title>Recorder</title>
+</head>
+
+<body style="margin:0;">
+<button id="btn" style="
+    width:120px;
+    height:120px;
+    border-radius:60px;
+    border:none;
+    background:#e74c3c;
+    color:white;
+    font-size:24px;
+    cursor:pointer;
+">🎤</button>
+
+<script>
+const btn = document.getElementById("btn");
+let mediaRecorder;
+let audioChunks = [];
+let stream;
+
+let SILENCE_TIMEOUT_MS = 5000;        // ← 5 seconds of silence
+let silenceTimer = null;
+let audioContext, analyser, dataArray;
+
+function startVAD() {
+    audioContext = new AudioContext();
+    const source = audioContext.createMediaStreamSource(stream);
+
+    analyser = audioContext.createAnalyser();
+    analyser.fftSize = 2048;
+    dataArray = new Uint8Array(analyser.fftSize);
+
+    source.connect(analyser);
+
+    function checkSilence() {
+        analyser.getByteTimeDomainData(dataArray);
+
+        let maxDeviation = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+            maxDeviation = Math.max(maxDeviation, Math.abs(dataArray[i] - 128));
+        }
+
+        const isSilent = maxDeviation < 5;
+
+        if (!isSilent) {
+            clearTimeout(silenceTimer);
+            silenceTimer = setTimeout(() => {
+                stopRecording();
+            }, SILENCE_TIMEOUT_MS);
+        }
+
+        requestAnimationFrame(checkSilence);
+    }
+
+    checkSilence();
+}
+
+async function startRecording() {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+    mediaRecorder = new MediaRecorder(stream);
+    audioChunks = [];
+
+    mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+
+    mediaRecorder.onstop = async () => {
+        const blob = new Blob(audioChunks, { type: "audio/wav" });
+        const arrayBuffer = await blob.arrayBuffer();
+
+        const bytes = Array.from(new Uint8Array(arrayBuffer));
+        sendToStreamlit(bytes);
+
+        stream.getTracks().forEach(t => t.stop());
+    };
+
+    mediaRecorder.start();
+    startVAD();
+}
+
+function stopRecording() {
+    if (mediaRecorder && mediaRecorder.state !== "inactive") {
+        mediaRecorder.stop();
+    }
+}
+
+function sendToStreamlit(bytes) {
+    const data = { data: bytes };
+    window.parent.postMessage({ isStreamlitMessage: true, type: "streamlit:componentReady" }, "*");
+    window.parent.postMessage({ isStreamlitMessage: true, type: "streamlit:render", args: data }, "*");
+}
+
+btn.onclick = () => {
+    if (!mediaRecorder || mediaRecorder.state === "inactive") {
+        btn.innerText = "⏹";
+        startRecording();
+    } else {
+        stopRecording();
+        btn.innerText = "🎤";
+    }
+};
+</script>
+</body>
+</html>
+
