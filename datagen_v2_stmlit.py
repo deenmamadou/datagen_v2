@@ -797,7 +797,22 @@ def run_streamlit_app() -> None:
                         icon_name="microphone",
                         icon_size="6x",
                     )
-                    st.markdown("</div>", unsafe_allow_html=True)
+                    st.markdown("""
+                    <script>
+                        function extendSilenceTimeout() {
+                            const recorder = window.streamlitAudioRecorder;
+                            if (!recorder) {
+                                setTimeout(extendSilenceTimeout, 200);
+                                return;
+                            }
+
+                            // Increase silence auto-stop timeout (milliseconds)
+                            recorder.VAD_SILENCE_TIMEOUT = 1800;   // ← adjust this
+                            console.log("Updated VAD silence timeout:", recorder.VAD_SILENCE_TIMEOUT);
+                        }
+                        extendSilenceTimeout();
+                    </script>
+                    """, unsafe_allow_html=True)
 
 
                     is_disabled = "true" if is_at_end else "false"
