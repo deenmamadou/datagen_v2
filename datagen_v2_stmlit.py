@@ -802,7 +802,7 @@ def run_streamlit_app() -> None:
                         function extendSilenceTimeout() {
                             const recorder = window.streamlitAudioRecorder;
                             if (!recorder) {
-                                setTimeout(extendSilenceTimeout, 200);
+                                setTimeout(extendSilenceTimeout, 300);
                                 return;
                             }
 
