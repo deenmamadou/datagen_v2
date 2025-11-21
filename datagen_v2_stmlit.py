@@ -813,7 +813,9 @@ def run_streamlit_app() -> None:
                         content = uploaded_file.read().decode("utf-8")
                         lines = [line.strip() for line in content.split("\n") if line.strip()]
 
-                        language = st.selectbox("Language", ["ar", "he", "fa", "ur"], index=0, key="file_lang")
+                        language = st.selectbox("Language", ["ar", "ar-AE",  "ar-SA", "ar-QA", "ar-KW", "ar-SY", 
+                        "ar-LB", "ar-PS", "ar-JO", "ar-EG", "ar-SD", "ar-TD", "ar-MA", "ar-DZ", "ar-TN", "he", "fa", "ur"], index=0,
+                         key="file_lang")
                         is_rtl = st.checkbox("RTL Language", value=True, key="file_rtl")
 
                         # NEW: Track the original filename
