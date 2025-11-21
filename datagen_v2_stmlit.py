@@ -506,7 +506,7 @@ def run_streamlit_app() -> None:
 
         # --- Login Title ---
         st.markdown(
-            "<h1 style='text-align: center;'>deen-mamadou-yacoubou</h1>",
+            "<h1 style='text-align: center;'>Datagen_v2</h1>",
             unsafe_allow_html=True
         )
         st.markdown("---")
