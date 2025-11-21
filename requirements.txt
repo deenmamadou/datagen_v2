@@ -7,4 +7,7 @@ streamlit
 audio-recorder-streamlit
 requests
 
+pyotp
+boto3
+
 
