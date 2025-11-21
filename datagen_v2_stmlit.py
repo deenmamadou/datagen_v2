@@ -25,7 +25,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
-AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+AWS_REGION = os.getenv("AWS_REGION", "us-west-1")
 
 
 def upload_bytes_to_s3(bytes_data: bytes, s3_key: str) -> str:
