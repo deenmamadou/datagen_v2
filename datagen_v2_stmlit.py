@@ -17,6 +17,41 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional, Tuple, List
 import hashlib
+import pyotp
+import sqlite3
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
+
+AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+AWS_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+
+
+def upload_bytes_to_s3(bytes_data: bytes, s3_key: str) -> str:
+    """Uploads raw bytes directly to S3 without saving locally."""
+    try:
+        s3 = boto3.client(
+            "s3",
+            aws_access_key_id=AWS_ACCESS_KEY,
+            aws_secret_access_key=AWS_SECRET_KEY,
+            region_name=AWS_REGION,
+        )
+
+        s3.put_object(
+            Bucket=AWS_BUCKET_NAME,
+            Key=s3_key,
+            Body=bytes_data,
+            ContentType="audio/wav"
+        )
+
+        return f"s3://{AWS_BUCKET_NAME}/{s3_key}"
+
+    except (BotoCoreError, ClientError) as e:
+        print("S3 upload failed:", e)
+        return None
+
+
 
 # --- Optional imports (Streamlit UI & mic recorder) ---
 HAS_STREAMLIT = True
@@ -89,6 +124,12 @@ def init_db(db_path: str = DB_PATH) -> None:
         c.execute("ALTER TABLE texts ADD COLUMN source_file TEXT")
     except sqlite3.OperationalError:
         pass  # column already exists
+    # ✅ Add MFA secret column if missing
+    
+    try:
+        c.execute("ALTER TABLE users ADD COLUMN mfa_secret TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
 
 
     c.execute(
@@ -251,8 +292,9 @@ def authenticate_user(username: str, password: str, db_path: str = DB_PATH) -> T
     password_hash = hashlib.sha256(password.encode()).hexdigest()
     
     # Check for admin user first
-    ADMIN_USERNAME = "deen.mamadou-yacoubou@deepgram.com"
-    ADMIN_PASSWORD = "Deepgram"
+    ADMIN_USERNAME = os.getenv("ADMIN_USERNAME")
+    ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
+
     
     if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
         # Check if admin user exists, create if not
@@ -281,6 +323,23 @@ def authenticate_user(username: str, password: str, db_path: str = DB_PATH) -> T
     if result:
         return (result[0], bool(result[1]))
     return (None, False)
+
+def get_user_mfa_secret(user_id, db_path=DB_PATH):
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("SELECT mfa_secret FROM users WHERE id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row and row[0] else None
+
+
+def set_user_mfa_secret(user_id, secret, db_path=DB_PATH):
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("UPDATE users SET mfa_secret = ? WHERE id = ?", (secret, user_id))
+    conn.commit()
+    conn.close()
+
 
 def load_progress(user):
     conn = get_db_connection()
@@ -425,8 +484,21 @@ def run_streamlit_app() -> None:
     init_db()
 
     # Session defaults
-    for key, val in {"text_ids": [], "current_text_index": 0, "audio_bytes": None, "user_id": None, "username": None, "authenticated": False, "is_admin": False}.items():
+    for key, val in {
+        "text_ids": [],
+        "current_text_index": 0,
+        "audio_bytes": None,
+        "user_id": None,
+        "username": None,
+        "authenticated": False,
+        "is_admin": False,
+        "mfa_stage": None,              # "enroll" or "verify"
+        "pending_mfa_secret": None,
+        "pending_mfa_user_id": None,
+        "pending_mfa_username": None,
+    }.items():
         st.session_state.setdefault(key, val)
+
 
     # Authentication UI
     # Authentication UI
@@ -434,7 +506,7 @@ def run_streamlit_app() -> None:
 
         # --- Login Title ---
         st.markdown(
-            "<h1 style='text-align: center;'>datagen_v2</h1>",
+            "<h1 style='text-align: center;'>deen-mamadou-yacoubou</h1>",
             unsafe_allow_html=True
         )
         st.markdown("---")
@@ -456,14 +528,36 @@ def run_streamlit_app() -> None:
                 if submitted:
                     user_id, is_admin = authenticate_user(username, password)
 
-                    if user_id:
-                        # Basic session info
+                    if user_id and is_admin:
+                        # -------- ADMIN: require TOTP MFA --------
+                        # Save temp admin identity
+                        st.session_state["pending_mfa_user_id"] = user_id
+                        st.session_state["pending_mfa_username"] = username
+
+                        # Check if admin already has an MFA secret
+                        existing_secret = get_user_mfa_secret(user_id)
+
+                        if existing_secret:
+                            # Go straight to verify stage
+                            st.session_state["pending_mfa_secret"] = existing_secret
+                            st.session_state["mfa_stage"] = "verify"
+                        else:
+                            # First-time setup: generate secret and go to enroll stage
+                            secret = pyotp.random_base32()
+                            st.session_state["pending_mfa_secret"] = secret
+                            st.session_state["mfa_stage"] = "enroll"
+
+                        st.rerun()
+
+
+                    elif user_id:
+                        # -------- Regular user: no MFA --------
                         st.session_state["user_id"] = user_id
                         st.session_state["username"] = username
                         st.session_state["authenticated"] = True
-                        st.session_state["is_admin"] = is_admin
+                        st.session_state["is_admin"] = False
 
-                        # Load language + progress
+                        # Load language + progress as you already do
                         user_lang = get_user_language(user_id)
                         st.session_state["chosen_language"] = user_lang
                         load_progress(username)
@@ -479,11 +573,12 @@ def run_streamlit_app() -> None:
                             if idx < 0 or idx >= len(st.session_state["text_ids"]):
                                 st.session_state["current_text_index"] = 0
 
-                        st.success("Signed in successfully!" + (" (Admin)" if is_admin else ""))
+                        st.success("Signed in successfully!")
                         st.rerun()
+
                     else:
                         st.error("Invalid username or password")
-
+                    
         # --------------------------
         # SIGN UP TAB
         # --------------------------
@@ -518,7 +613,119 @@ def run_streamlit_app() -> None:
                         else:
                             st.error("Username already exists")
 
-        return
+
+    # --------------------------
+    # ADMIN TOTP MFA SCREENS
+    # --------------------------
+    if st.session_state.get("mfa_stage") == "enroll":
+        st.markdown("### Admin: Set up Two-Factor Authentication (TOTP)")
+
+        secret = st.session_state["pending_mfa_secret"]
+        admin_name = st.session_state.get("pending_mfa_username", "admin")
+
+        # TOTP URI for Google Authenticator
+        totp = pyotp.TOTP(secret)
+        uri = totp.provisioning_uri(
+            name=admin_name,
+            issuer_name="deen-mamadou-yacoubou"
+        )
+
+        st.write("1. Open Google Authenticator (or any TOTP app).")
+        st.write("2. Add a new account.")
+        st.write("3. Choose **Enter a setup key** (manual entry), then use:")
+        st.code(f"Account: {admin_name}\nKey: {secret}\nType: Time-based", language="text")
+        st.write("Alternatively, you can add this URI manually:")
+        st.code(uri, language="text")
+
+        code_input = st.text_input("Enter the 6-digit code from your Authenticator app", max_chars=6)
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            confirm = st.button("Verify & Enable MFA")
+        with col_b:
+            cancel = st.button("Cancel")
+
+        if cancel:
+            # Reset MFA state, go back to normal login
+            st.session_state["mfa_stage"] = None
+            st.session_state["pending_mfa_secret"] = None
+            st.session_state["pending_mfa_user_id"] = None
+            st.session_state["pending_mfa_username"] = None
+            st.rerun()
+
+
+        if confirm:
+            if totp.verify(code_input.strip()):
+                # Save permanent secret
+                user_id = st.session_state["pending_mfa_user_id"]
+                set_user_mfa_secret(user_id, secret)
+
+                # Log admin in
+                st.session_state["user_id"] = user_id
+                st.session_state["username"] = st.session_state["pending_mfa_username"]
+                st.session_state["authenticated"] = True
+                st.session_state["is_admin"] = True
+
+                # Clear MFA temp state
+                st.session_state["mfa_stage"] = None
+                st.session_state["pending_mfa_secret"] = None
+                st.session_state["pending_mfa_user_id"] = None
+                st.session_state["pending_mfa_username"] = None
+
+                st.success("MFA enabled and admin logged in.")
+                st.rerun()
+
+            else:
+                st.error("Invalid code. Please try again.")
+
+        return  # stop rendering other login UI
+
+    if st.session_state.get("mfa_stage") == "verify":
+        st.markdown("### Admin: Enter your TOTP code")
+
+        secret = st.session_state["pending_mfa_secret"]
+        totp = pyotp.TOTP(secret)
+
+        code_input = st.text_input("6-digit code", max_chars=6)
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            verify = st.button("Verify")
+        with col_b:
+            cancel = st.button("Cancel")
+
+        if cancel:
+            # Reset MFA state, go back to login
+            st.session_state["mfa_stage"] = None
+            st.session_state["pending_mfa_secret"] = None
+            st.session_state["pending_mfa_user_id"] = None
+            st.session_state["pending_mfa_username"] = None
+            st.rerun()
+
+
+        if verify:
+            if totp.verify(code_input.strip()):
+                # Log admin in
+                st.session_state["user_id"] = st.session_state["pending_mfa_user_id"]
+                st.session_state["username"] = st.session_state["pending_mfa_username"]
+                st.session_state["authenticated"] = True
+                st.session_state["is_admin"] = True
+
+                # Clear MFA temp state
+                st.session_state["mfa_stage"] = None
+                st.session_state["pending_mfa_secret"] = None
+                st.session_state["pending_mfa_user_id"] = None
+                st.session_state["pending_mfa_username"] = None
+
+                st.success("Admin authenticated.")
+                st.rerun()
+
+            else:
+                st.error("Invalid code. Please try again.")
+
+        return  # stop rendering other login UI
+
+    
 
 
     # Sidebar configuration
@@ -673,7 +880,7 @@ def run_streamlit_app() -> None:
                 st.header("Language")
 
                 if not st.session_state.get("chosen_language"):
-                    st.info("Please choose your language in the main panel.")
+                    st.info("Assigned language")
                 else:
                     st.info(f"Language: **{st.session_state['chosen_language']}**")
                     
@@ -705,43 +912,14 @@ def run_streamlit_app() -> None:
         """, unsafe_allow_html=True)
 
 
-        # ---- FIRST-TIME LANGUAGE SELECTION (MAIN AREA) ----
-        if st.session_state.get("authenticated", False) and not st.session_state.get("is_admin", False):
-            if st.session_state.get("chosen_language") is None:
-                st.markdown("## Choose your language")
-                texts = get_all_texts(db_path=DB_PATH)
-                language_choices = sorted({t[2] for t in texts})
+    # ---- FIRST-TIME LANGUAGE SELECTION (MAIN AREA) ----
+    if st.session_state.get("authenticated", False) and not st.session_state.get("is_admin", False):
+        if st.session_state.get("chosen_language") is None:
+            st.markdown("### Welcome to datagen_v2")
+            st.write("Your account has been created successfully.")
+            st.info("Please contact your admin to be assigned a language before you can begin recording.")
+            return
 
-                if not language_choices:
-                    st.warning("No languages available. Please contact your admin.")
-                    # Nothing else to show yet
-                    return
-
-                chosen_lang = st.selectbox(
-                    "Language",
-                    language_choices,
-                    key="main_lang_choice"
-                )
-
-                if st.button("Confirm Language", key="main_lang_confirm"):
-                    # Save permanently for this user
-                    save_user_language(st.session_state["user_id"], chosen_lang)
-                    st.session_state["chosen_language"] = chosen_lang
-
-                    # Load text IDs for that language
-                    lang_texts = [t for t in texts if t[2] == chosen_lang]
-                    st.session_state["text_ids"] = [t[0] for t in lang_texts]
-
-                    # Start from saved progress if any (for safety)
-                    idx = st.session_state.get("current_text_index", 0)
-                    if idx < 0 or idx >= len(st.session_state["text_ids"]):
-                        idx = 0
-                    st.session_state["current_text_index"] = idx
-
-                    st.rerun()
-
-                # IMPORTANT: stop here so main UI doesn't render until language is set
-                return
 
     # Main prompt UI as before, but the prompts are now filtered by chosen language
     if st.session_state.get("text_ids"):
@@ -797,37 +975,22 @@ def run_streamlit_app() -> None:
                         icon_name="microphone",
                         icon_size="6x",
                     )
-                    st.markdown(st.markdown("""
+                    st.markdown("""
                     <script>
-                    function disableSilenceAutoStop() {
-                        const rec = window.streamlitAudioRecorder;
-                        if (!rec || !rec.mediaRecorder) {
-                            setTimeout(disableSilenceAutoStop, 300);
-                            return;
+                        function extendSilenceTimeout() {
+                            const recorder = window.streamlitAudioRecorder;
+                            if (!recorder) {
+                                setTimeout(extendSilenceTimeout, 300);
+                                return;
+                            }
+
+                            // Increase silence auto-stop timeout (milliseconds)
+                            recorder.VAD_SILENCE_TIMEOUT = 44000;   // ← adjust this
+                            console.log("Updated VAD silence timeout:", recorder.VAD_SILENCE_TIMEOUT);
                         }
-
-                        console.log("🔧 Disabling silence auto-stop…");
-
-                        // Disable any silence timers the plugin uses
-                        rec.VAD_SILENCE_TIMEOUT = 999999;  
-                        rec.SILENCE_DELAY = 999999;
-
-                        // Patch stop() so silence does NOT trigger it
-                        rec._originalStop = rec.mediaRecorder.stop;
-                        rec.mediaRecorder.stop = function() {
-                            console.log("MediaRecorder stop() was called — ignoring (patch active)");
-                            // Do nothing (prevent silence stopping)
-                        };
-
-                        // Also block plugin’s own auto-stop function
-                        rec.stop = function() {
-                            console.log("Recorder stop() suppressed.");
-                        };
-                    }
-                    disableSilenceAutoStop();
+                        extendSilenceTimeout();
                     </script>
                     """, unsafe_allow_html=True)
-, unsafe_allow_html=True)
 
 
                     is_disabled = "true" if is_at_end else "false"
@@ -923,18 +1086,26 @@ def run_streamlit_app() -> None:
                     # -------------------------
                     base_name = f"{langcode}_{user_id}_{text_number}"
 
-                    # --- Save audio ---
-                    audio_filename = f"{audio_dir}/{base_name}.wav"
-                    with open(audio_filename, "wb") as f:
-                        f.write(audio_bytes)
+                    # -------------------------
+                    # UPLOAD AUDIO + TEXT TO S3 (NO LOCAL COPY)
+                    # -------------------------
+                    user_id = st.session_state["user_id"]
+                    langcode = language  # from text_data tuple
+                    text_number = st.session_state["current_text_index"] + 1
+                    base_name = f"{langcode}_{user_id}_{text_number}"
 
-                    # --- Save displayed text as .txt ---
-                    txt_filename = f"{txt_dir}/{base_name}.txt"
-                    with open(txt_filename, "w", encoding="utf-8") as f:
-                        f.write(text)
+                    audio_key = f"user_{user_id}/audio/{base_name}.wav"
+                    text_key = f"user_{user_id}/transcripts/{base_name}.txt"
 
-                    # Save audio path to DB (no changes)
-                    save_recording(text_id, audio_filename, "saved")
+                    # Upload audio bytes directly
+                    audio_s3_uri = upload_bytes_to_s3(audio_bytes, audio_key)
+
+                    # Upload transcript text directly
+                    upload_bytes_to_s3(text.encode("utf-8"), text_key)
+
+                    # Save S3 path in DB instead of local path
+                    save_recording(text_id, audio_s3_uri, "saved")
+
 
                     # -------------------------
                     # Existing state logic stays the same
@@ -952,20 +1123,25 @@ def run_streamlit_app() -> None:
                     st.success("Recording submitted! Moving to the next script.")
                     st.rerun()
 
-
-    else:
-        if st.session_state.get("authenticated", False):
-            st.info("Choose your language from the sidebar to get started.")
-
     # User's own recordings section (for regular users)
     if not st.session_state.get("is_admin", False) and st.session_state.get("user_id"):
         st.markdown("---")
-        st.subheader("My Recordings")
+        submitted_count = st.session_state["current_text_index"]
+        st.subheader(f"My Recordings ({submitted_count})")
         user_recordings = get_all_recordings_by_user(user_id=st.session_state["user_id"])
+                # --- Assign user-local recording numbers instead of global DB IDs ---
+        # DB returns newest first, so reverse for chronological numbering
+        ordered = list(reversed(user_recordings))
+
+        indexed_records = []
+        for i, rec in enumerate(ordered, start=1):
+            indexed_records.append((i, rec))  # (local_number, db_row)
+
         if user_recordings:
-            for rec in user_recordings:
+            for local_num, rec in indexed_records:
                 rec_id, audio_path, job_id, status, created_at, text_content, text_id, username = rec
-                with st.expander(f"Recording {rec_id} - {created_at} | Status: {status}"):
+
+                with st.expander(f"Recording {local_num} - {created_at} | Status: {status}"):
                     st.write(f"**Text ID:** {text_id}")
                     st.write(f"**Text:** {text_content[:100]}{'...' if len(text_content) > 100 else ''}")
                     if os.path.exists(audio_path):
@@ -977,6 +1153,46 @@ def run_streamlit_app() -> None:
 
     # Admin section: Show all recordings
     if st.session_state.get("is_admin", False):
+        st.markdown("## Assign Languages to New Users")
+
+        # Fetch users without a chosen language
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("""
+            SELECT id, username 
+            FROM users 
+            WHERE chosen_language IS NULL OR chosen_language = ''
+        """)
+        unassigned_users = c.fetchall()
+        conn.close()
+
+        if not unassigned_users:
+            st.info("All users have been assigned a language.")
+        else:
+            st.write("These users need to be assigned a language:")
+
+            lang_texts = get_all_texts(db_path=DB_PATH)
+            language_choices = sorted({t[2] for t in lang_texts})
+
+            assignments = {}
+            for uid, uname in unassigned_users:
+                lang = st.selectbox(
+                    f"Language for {uname}",
+                    language_choices,
+                    key=f"assign_lang_{uid}"
+                )
+                assignments[uid] = lang
+
+            if st.button("Save Assignments", key="save_assignments_btn"):
+                conn = sqlite3.connect(DB_PATH)
+                c = conn.cursor()
+                for uid, lang in assignments.items():
+                    c.execute("UPDATE users SET chosen_language=? WHERE id=?", (lang, uid))
+                conn.commit()
+                conn.close()
+                st.success("Assignments saved successfully!")
+                st.rerun()
+    
         st.markdown("---")
         st.subheader("Admin: All Recordings")
         all_recordings = get_all_recordings_by_user(user_id=None)
@@ -1065,3 +1281,4 @@ if __name__ == "__main__":
         print("    pip install streamlit audio-recorder-streamlit requests\n")
         run_tests()
         print("\nIf you want me to modify this for a pure CLI workflow, tell me your expected behavior (navigation, recording, upload).")
+
