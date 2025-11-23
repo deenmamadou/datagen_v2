@@ -1235,18 +1235,24 @@ def run_streamlit_app() -> None:
 
         for user_id, uname, is_admin_flag, lang in filtered:
             with st.expander(f"{uname}"):
+
+                SUPER_ADMIN = os.getenv("ADMIN_USERNAME")
+                is_super_admin = (uname == SUPER_ADMIN)
+
                 st.write(f"User ID: {user_id}")
                 st.write(f"Current language: {lang or 'None assigned'}")
                 st.write(f"Admin: {'Yes' if is_admin_flag else 'No'}")
 
-                # Assign language
+                # -------------------------------
+                # Assign Language (Allowed Always)
+                # -------------------------------
                 new_lang = st.selectbox(
                     "Assign language",
                     ["None", "ar", "ar-AE", "ar-SA", "ar-QA", "ar-KW", "ar-SY",
                     "ar-LB", "ar-PS", "ar-JO", "ar-EG", "ar-SD", "ar-TD",
                     "ar-MA", "ar-DZ", "ar-TN", "he", "fa", "ur"],
                     index=0 if lang is None else 1,
-                    key=f"lang_select_user_{user_id}"     # ✅ UNIQUE KEY
+                    key=f"lang_select_user_{user_id}"
                 )
 
                 if st.button(f"Save Language for {uname}", key=f"save_lang_{user_id}"):
@@ -1257,24 +1263,40 @@ def run_streamlit_app() -> None:
                     st.success("Language updated.")
                     st.rerun()
 
-                # Promote/demote admin
+                st.markdown("---")
+
+                # ------------------------------------
+                # SUPER ADMIN PROTECTION (UI Controls)
+                # ------------------------------------
+                if is_super_admin:
+                    st.info("This user is the SUPER ADMIN and cannot be modified.")
+                    # ⬆ No admin toggle, no MFA reset
+                    continue
+
+                # ---------------------------
+                # Promote / Demote Admin
+                # ---------------------------
                 if is_admin_flag:
                     if st.button(
-                            f"Remove Admin Access from {uname}",
-                            key=f"demote_admin_{user_id}"
-                        ):
+                        f"Remove Admin Access from {uname}",
+                        key=f"demote_admin_{user_id}"
+                    ):
                         set_user_admin(user_id, False)
                         st.success("User demoted from admin.")
                         st.rerun()
                 else:
-                    if st.button(f"Make {uname} Admin",
-                                key=f"promote_admin_{user_id}"):
+                    if st.button(
+                        f"Make {uname} Admin",
+                        key=f"promote_admin_{user_id}"
+                    ):
                         set_user_admin(user_id, True)
-                        reset_user_mfa(user_id)   # force MFA setup
-                        st.success("User promoted to admin — will require MFA on next login.")
+                        reset_user_mfa(user_id)  # force MFA setup
+                        st.success("User promoted to admin — MFA required on next login.")
                         st.rerun()
 
-                # Reset MFA
+                # ---------------------------
+                # Reset MFA (Not for super admin)
+                # ---------------------------
                 if st.button(f"Reset MFA for {uname}", key=f"reset_mfa_{user_id}"):
                     reset_user_mfa(user_id)
                     st.success("MFA reset — user will need to re-enroll.")
