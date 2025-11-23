@@ -1304,8 +1304,6 @@ def run_streamlit_app() -> None:
                                 st.audio(audio_path, format="audio/wav")
                             st.write(f"**Status:** {status}")
                             st.write(f"**Created:** {created_at}")
-    else:
-        st.info("No recordings found in the system.")
 
 
 # --- End of Section 3 ---
