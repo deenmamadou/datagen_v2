@@ -1245,10 +1245,11 @@ def run_streamlit_app() -> None:
                     ["None", "ar", "ar-AE", "ar-SA", "ar-QA", "ar-KW", "ar-SY",
                     "ar-LB", "ar-PS", "ar-JO", "ar-EG", "ar-SD", "ar-TD",
                     "ar-MA", "ar-DZ", "ar-TN", "he", "fa", "ur"],
-                    index=0 if lang is None else 1
+                    index=0 if lang is None else 1,
+                    key=f"lang_select_user_{user_id}"     # ✅ UNIQUE KEY
                 )
 
-                if st.button(f"Save Language for {uname}"):
+                if st.button(f"Save Language for {uname}", key=f"save_lang_{user_id}"):
                     if new_lang == "None":
                         save_user_language(user_id, None)
                     else:
@@ -1258,19 +1259,23 @@ def run_streamlit_app() -> None:
 
                 # Promote/demote admin
                 if is_admin_flag:
-                    if st.button(f"Remove Admin Access from {uname}"):
+                    if st.button(
+                            f"Remove Admin Access from {uname}",
+                            key=f"demote_admin_{user_id}"
+                        ):
                         set_user_admin(user_id, False)
                         st.success("User demoted from admin.")
                         st.rerun()
                 else:
-                    if st.button(f"Make {uname} Admin"):
+                    if st.button(f"Make {uname} Admin",
+                                key=f"promote_admin_{user_id}"):
                         set_user_admin(user_id, True)
                         reset_user_mfa(user_id)   # force MFA setup
                         st.success("User promoted to admin — will require MFA on next login.")
                         st.rerun()
 
                 # Reset MFA
-                if st.button(f"Reset MFA for {uname}"):
+                if st.button(f"Reset MFA for {uname}", key=f"reset_mfa_{user_id}"):
                     reset_user_mfa(user_id)
                     st.success("MFA reset — user will need to re-enroll.")
                     st.rerun()
