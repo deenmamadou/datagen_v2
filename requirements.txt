@@ -9,5 +9,7 @@ requests
 
 pyotp
 boto3
+pillow
+botocore
 
 

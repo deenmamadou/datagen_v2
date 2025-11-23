@@ -21,6 +21,8 @@ import pyotp
 import sqlite3
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
+import qrcode
+from io import BytesIO
 
 AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
@@ -203,6 +205,32 @@ def init_db(db_path: str = DB_PATH) -> None:
     )
     conn.commit()
     conn.close()
+
+def get_all_users(db_path=DB_PATH):
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("SELECT id, username, is_admin, chosen_language FROM users ORDER BY username ASC")
+    users = c.fetchall()
+    conn.close()
+    return users
+
+
+def set_user_admin(user_id: int, make_admin: bool, db_path=DB_PATH):
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("UPDATE users SET is_admin = ? WHERE id = ?", (1 if make_admin else 0, user_id))
+    conn.commit()
+    conn.close()
+
+
+def reset_user_mfa(user_id: int, db_path=DB_PATH):
+    """Admin reset: clears MFA so user must re-enroll on next login."""
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("UPDATE users SET mfa_secret = NULL WHERE id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
 
 
 def get_all_texts(user_id: Optional[int] = None, db_path: str = DB_PATH) -> list:
@@ -551,6 +579,30 @@ def run_streamlit_app() -> None:
 
 
                     elif user_id:
+                        # Check whether user is admin
+                        if is_admin:
+                            # Admin must have MFA
+                            st.session_state["pending_mfa_user_id"] = user_id
+                            st.session_state["pending_mfa_username"] = username
+
+                            existing_secret = get_user_mfa_secret(user_id)
+                            if existing_secret:
+                                st.session_state["pending_mfa_secret"] = existing_secret
+                                st.session_state["mfa_stage"] = "verify"
+                            else:
+                                secret = pyotp.random_base32()
+                                st.session_state["pending_mfa_secret"] = secret
+                                st.session_state["mfa_stage"] = "enroll"
+
+                            st.rerun()
+
+                        # Normal user (non-admin)
+                        st.session_state["user_id"] = user_id
+                        st.session_state["username"] = username
+                        st.session_state["authenticated"] = True
+                        st.session_state["is_admin"] = False
+
+
                         # -------- Regular user: no MFA --------
                         st.session_state["user_id"] = user_id
                         st.session_state["username"] = username
@@ -630,12 +682,24 @@ def run_streamlit_app() -> None:
             issuer_name="deen-mamadou-yacoubou"
         )
 
-        st.write("1. Open Google Authenticator (or any TOTP app).")
-        st.write("2. Add a new account.")
-        st.write("3. Choose **Enter a setup key** (manual entry), then use:")
-        st.code(f"Account: {admin_name}\nKey: {secret}\nType: Time-based", language="text")
-        st.write("Alternatively, you can add this URI manually:")
-        st.code(uri, language="text")
+        # QR Code MFA Setup
+
+        totp = pyotp.TOTP(secret)
+        uri = totp.provisioning_uri(
+            name=admin_name,
+            issuer_name="datagen_v2"
+        )
+
+        # Generate QR code
+        qr = qrcode.make(uri)
+        buf = BytesIO()
+        qr.save(buf, format="PNG")
+
+        st.markdown("Scan this QR code with Google Authenticator:")
+        st.image(buf.getvalue(), width=250)
+
+        st.markdown("After scanning the QR code, enter the 6-digit code below.")
+
 
         code_input = st.text_input("Enter the 6-digit code from your Authenticator app", max_chars=6)
 
@@ -1153,64 +1217,95 @@ def run_streamlit_app() -> None:
         else:
             st.info("You haven't made any recordings yet.")
 
-    # Admin section: Show all recordings
+
+# Admin section: Show all recordings (GROUPED BY USER)
     if st.session_state.get("is_admin", False):
-        st.markdown("## Assign Languages to New Users")
+        # -------------------------
+        # ADMIN USER MANAGEMENT
+        # -------------------------
+        st.subheader("User Management")
 
-        # Fetch users without a chosen language
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("""
-            SELECT id, username 
-            FROM users 
-            WHERE chosen_language IS NULL OR chosen_language = ''
-        """)
-        unassigned_users = c.fetchall()
-        conn.close()
+        users = get_all_users()
+        search = st.text_input("Search users by name")
 
-        if not unassigned_users:
-            st.info("All users have been assigned a language.")
-        else:
-            st.write("These users need to be assigned a language:")
+        filtered = [
+            u for u in users
+            if search.lower() in u[1].lower()
+        ]
 
-            lang_texts = get_all_texts(db_path=DB_PATH)
-            language_choices = sorted({t[2] for t in lang_texts})
+        for user_id, uname, is_admin_flag, lang in filtered:
+            with st.expander(f"{uname}"):
+                st.write(f"User ID: {user_id}")
+                st.write(f"Current language: {lang or 'None assigned'}")
+                st.write(f"Admin: {'Yes' if is_admin_flag else 'No'}")
 
-            assignments = {}
-            for uid, uname in unassigned_users:
-                lang = st.selectbox(
-                    f"Language for {uname}",
-                    language_choices,
-                    key=f"assign_lang_{uid}"
+                # Assign language
+                new_lang = st.selectbox(
+                    "Assign language",
+                    ["None", "ar", "ar-AE", "ar-SA", "ar-QA", "ar-KW", "ar-SY",
+                    "ar-LB", "ar-PS", "ar-JO", "ar-EG", "ar-SD", "ar-TD",
+                    "ar-MA", "ar-DZ", "ar-TN", "he", "fa", "ur"],
+                    index=0 if lang is None else 1
                 )
-                assignments[uid] = lang
 
-            if st.button("Save Assignments", key="save_assignments_btn"):
-                conn = sqlite3.connect(DB_PATH)
-                c = conn.cursor()
-                for uid, lang in assignments.items():
-                    c.execute("UPDATE users SET chosen_language=? WHERE id=?", (lang, uid))
-                conn.commit()
-                conn.close()
-                st.success("Assignments saved successfully!")
-                st.rerun()
-    
+                if st.button(f"Save Language for {uname}"):
+                    if new_lang == "None":
+                        save_user_language(user_id, None)
+                    else:
+                        save_user_language(user_id, new_lang)
+                    st.success("Language updated.")
+                    st.rerun()
+
+                # Promote/demote admin
+                if is_admin_flag:
+                    if st.button(f"Remove Admin Access from {uname}"):
+                        set_user_admin(user_id, False)
+                        st.success("User demoted from admin.")
+                        st.rerun()
+                else:
+                    if st.button(f"Make {uname} Admin"):
+                        set_user_admin(user_id, True)
+                        reset_user_mfa(user_id)   # force MFA setup
+                        st.success("User promoted to admin — will require MFA on next login.")
+                        st.rerun()
+
+                # Reset MFA
+                if st.button(f"Reset MFA for {uname}"):
+                    reset_user_mfa(user_id)
+                    st.success("MFA reset — user will need to re-enroll.")
+                    st.rerun()
+
+
         st.markdown("---")
-        st.subheader("Admin: All Recordings")
+        st.subheader("Admin: All Recordings (Grouped by User)")
+
         all_recordings = get_all_recordings_by_user(user_id=None)
-        if all_recordings:
+
+        if not all_recordings:
+            st.info("No recordings found in the system.")
+        else:
+            # Group by username
+            grouped = {}
             for rec in all_recordings:
                 rec_id, audio_path, job_id, status, created_at, text_content, text_id, username = rec
-                with st.expander(f"Recording {rec_id} - User: {username or 'Unknown'} - {created_at} | Status: {status}"):
-                    st.write(f"**Text ID:** {text_id}")
-                    st.write(f"**Text:** {text_content[:100]}{'...' if len(text_content) > 100 else ''}")
-                    st.write(f"**User:** {username or 'Unknown'}")
-                    if os.path.exists(audio_path):
-                        st.audio(audio_path, format="audio/wav")
-                    st.write(f"**Status:** {status}")
-                    st.write(f"**Created:** {created_at}")
-        else:
-            st.info("No recordings found in the system.")
+                key = username or "Unknown"
+                grouped.setdefault(key, []).append(rec)
+
+            # Render group dropdowns
+            for username, rec_list in grouped.items():
+                with st.expander(f"User: {username} — {len(rec_list)} recordings"):
+                    # Inside each dropdown, list that user's recordings
+                    for rec in rec_list:
+                        rec_id, audio_path, job_id, status, created_at, text_content, text_id, username = rec
+                        with st.expander(f"Recording {rec_id} — {created_at} | Status: {status}"):
+                            st.write(f"**Text ID:** {text_id}")
+                            st.write(f"**Text:** {text_content[:100]}{'...' if len(text_content) > 100 else ''}")
+                            if audio_path and os.path.exists(audio_path):
+                                st.audio(audio_path, format="audio/wav")
+                            st.write(f"**Status:** {status}")
+                            st.write(f"**Created:** {created_at}")
+    else:
+        st.info("No recordings found in the system.")
 
 
 # --- End of Section 3 ---
