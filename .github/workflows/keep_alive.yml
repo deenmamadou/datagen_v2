@@ -1,14 +1,21 @@
-name: Keep Streamlit App Awake
+name: Keep Streamlit App Alive
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # every 10 minutes
-  workflow_dispatch:
+    - cron: "*/15 * * * *"   # ping every 15 minutes
+  workflow_dispatch:         # allow manual trigger
 
 jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping Streamlit App
+      - name: Keep Alive Ping
         run: |
-          curl -I https://datagen-v2.streamlit.app || true
+          echo "Pinging Streamlit app..."
+          curl -I -L \
+            -c cookies.txt \
+            -b cookies.txt \
+            -A "Mozilla/5.0 (KeepAliveBot)" \
+            https://datagen-v2.streamlit.app/ \
+            --max-time 30
+
