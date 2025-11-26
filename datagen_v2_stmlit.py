@@ -1244,8 +1244,9 @@ def run_streamlit_app() -> None:
                     # -------------------------
                     # UPDATED S3 PATHS WITH LANGUAGE GROUPING
                     # -------------------------
-                    audio_key = f"{user_language_folder}/user_{user_id}/audio/{base_name}.wav"
-                    text_key = f"{user_language_folder}/user_{user_id}/transcripts/{base_name}.txt"
+
+                    audio_key = f"{user_language_folder}/{username}/audio/{base_name}.wav"
+                    text_key  = f"{user_language_folder}/{username}/transcripts/{base_name}.txt"
 
                     # Upload audio bytes directly
                     audio_s3_uri = upload_bytes_to_s3(audio_bytes, audio_key)
