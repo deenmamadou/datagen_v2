@@ -12,6 +12,7 @@ boto3
 pillow
 botocore
 qrcode
+re
 
 
 

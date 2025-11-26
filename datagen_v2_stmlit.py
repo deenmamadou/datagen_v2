@@ -23,6 +23,7 @@ import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 import qrcode
 from io import BytesIO
+import re
 
 AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
@@ -132,6 +133,12 @@ def init_db(db_path: str = DB_PATH) -> None:
         c.execute("ALTER TABLE users ADD COLUMN mfa_secret TEXT")
     except sqlite3.OperationalError:
         pass  # Column already exists
+
+    # ✅ Add last_mfa timestamp column for MFA cooldown
+    try:
+        c.execute("ALTER TABLE users ADD COLUMN last_mfa TIMESTAMP")
+    except sqlite3.OperationalError:
+        pass  # already exists
 
 
     c.execute(
@@ -368,6 +375,37 @@ def set_user_mfa_secret(user_id, secret, db_path=DB_PATH):
     conn.commit()
     conn.close()
 
+# -------------------------
+# MFA Cooldown Helpers
+# -------------------------
+def update_mfa_timestamp(user_id, db_path=DB_PATH):
+    """Store timestamp of last successful MFA verification."""
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("UPDATE users SET last_mfa=CURRENT_TIMESTAMP WHERE id=?", (user_id,))
+    conn.commit()
+    conn.close()
+
+
+def needs_mfa(user_id, hours=12, db_path=DB_PATH):
+    """Return True if MFA is required again."""
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("SELECT last_mfa FROM users WHERE id=?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+
+    if not row or not row[0]:
+        return True  # never MFA’d before
+
+    try:
+        last = datetime.fromisoformat(row[0])
+    except Exception:
+        return True
+
+    diff = datetime.now() - last
+    return diff.total_seconds() > hours * 3600
+
 
 def load_progress(user):
     conn = get_db_connection()
@@ -555,8 +593,17 @@ def run_streamlit_app() -> None:
 
                 if submitted:
                     user_id, is_admin = authenticate_user(username, password)
-
                     if user_id and is_admin:
+                        # -------- ADMIN: Check if MFA is needed --------
+                        if not needs_mfa(user_id):
+                            # MFA NOT required — auto-login
+                            st.session_state["user_id"] = user_id
+                            st.session_state["username"] = username
+                            st.session_state["authenticated"] = True
+                            st.session_state["is_admin"] = True
+                            st.success("Signed in — MFA not required this time.")
+                            st.rerun()
+
                         # -------- ADMIN: require TOTP MFA --------
                         # Save temp admin identity
                         st.session_state["pending_mfa_user_id"] = user_id
@@ -724,6 +771,8 @@ def run_streamlit_app() -> None:
                 user_id = st.session_state["pending_mfa_user_id"]
                 set_user_mfa_secret(user_id, secret)
 
+                update_mfa_timestamp(user_id)
+
                 # Log admin in
                 st.session_state["user_id"] = user_id
                 st.session_state["username"] = st.session_state["pending_mfa_username"]
@@ -771,6 +820,7 @@ def run_streamlit_app() -> None:
             if totp.verify(code_input.strip()):
                 # Log admin in
                 st.session_state["user_id"] = st.session_state["pending_mfa_user_id"]
+                update_mfa_timestamp(user_id)
                 st.session_state["username"] = st.session_state["pending_mfa_username"]
                 st.session_state["authenticated"] = True
                 st.session_state["is_admin"] = True
@@ -1153,15 +1203,25 @@ def run_streamlit_app() -> None:
                     base_name = f"{langcode}_{user_id}_{text_number}"
 
                     # -------------------------
-                    # UPLOAD AUDIO + TEXT TO S3 (NO LOCAL COPY)
+                    # NEW: Determine S3 language folder from user's assigned language
                     # -------------------------
                     user_id = st.session_state["user_id"]
-                    langcode = language  # from text_data tuple
-                    text_number = st.session_state["current_text_index"] + 1
-                    base_name = f"{langcode}_{user_id}_{text_number}"
 
-                    audio_key = f"user_{user_id}/audio/{base_name}.wav"
-                    text_key = f"user_{user_id}/transcripts/{base_name}.txt"
+                    user_language_folder = st.session_state.get("chosen_language")
+                    if not user_language_folder:
+                        user_language_folder = "unassigned"   # fallback to avoid breaking uploads
+
+                    # Recording index (1-based)
+                    text_number = st.session_state["current_text_index"] + 1
+
+                    # Base filename, unchanged
+                    base_name = f"{language}_{user_id}_{text_number}"
+
+                    # -------------------------
+                    # UPDATED S3 PATHS WITH LANGUAGE GROUPING
+                    # -------------------------
+                    audio_key = f"{user_language_folder}/user_{user_id}/audio/{base_name}.wav"
+                    text_key = f"{user_language_folder}/user_{user_id}/transcripts/{base_name}.txt"
 
                     # Upload audio bytes directly
                     audio_s3_uri = upload_bytes_to_s3(audio_bytes, audio_key)
@@ -1169,8 +1229,9 @@ def run_streamlit_app() -> None:
                     # Upload transcript text directly
                     upload_bytes_to_s3(text.encode("utf-8"), text_key)
 
-                    # Save S3 path in DB instead of local path
+                    # Save S3 path in DB
                     save_recording(text_id, audio_s3_uri, "saved")
+ 
 
 
                     # -------------------------
@@ -1315,7 +1376,13 @@ def run_streamlit_app() -> None:
             grouped = {}
             for rec in all_recordings:
                 rec_id, audio_path, job_id, status, created_at, text_content, text_id, username = rec
-                key = username or "Unknown"
+                m = re.search(r"user_(\d+)", str(audio_path))
+                if m:
+                    uid = int(m.group(1))
+                    key = next((u[1] for u in users if u[0] == uid), f"user_{uid}")
+                else:
+                    key = username or "Unknown"
+
                 grouped.setdefault(key, []).append(rec)
 
             # Render group dropdowns
@@ -1327,7 +1394,8 @@ def run_streamlit_app() -> None:
                         with st.expander(f"Recording {rec_id} — {created_at} | Status: {status}"):
                             st.write(f"**Text ID:** {text_id}")
                             st.write(f"**Text:** {text_content[:100]}{'...' if len(text_content) > 100 else ''}")
-                            if audio_path and os.path.exists(audio_path):
+                            if audio_path:
+                                # S3 URL support (Streamlit handles it natively)
                                 st.audio(audio_path, format="audio/wav")
                             st.write(f"**Status:** {status}")
                             st.write(f"**Created:** {created_at}")
