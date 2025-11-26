@@ -3,16 +3,10 @@ audio-recorder-streamlit>=0.0.8
 requests>=2.31.0
 pydub>=0.25.1
 
-streamlit
-audio-recorder-streamlit
-requests
-
 pyotp
+Pillow
 boto3
-pillow
-botocore
 qrcode
-re
 
 
 
