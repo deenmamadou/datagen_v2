@@ -467,6 +467,25 @@ def recording_exists_for_text(text_id: int, audio_bytes: bytes, db_path: str = D
 # ----------------------
 # Recording DB functions
 # ----------------------
+def generate_presigned_url(s3_uri: str, expires=300):
+    # s3_uri is like: s3://bucket/key
+    bucket = AWS_BUCKET_NAME
+
+    key = s3_uri.replace(f"s3://{bucket}/", "")
+
+    s3 = boto3.client(
+        "s3",
+        aws_access_key_id=AWS_ACCESS_KEY,
+        aws_secret_access_key=AWS_SECRET_KEY,
+        region_name=AWS_REGION,
+    )
+
+    return s3.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": bucket, "Key": key},
+        ExpiresIn=expires
+    )
+
 
 def save_recording(
     text_id: int,
@@ -1277,7 +1296,15 @@ def run_streamlit_app() -> None:
                     st.write(f"**Text ID:** {text_id}")
                     st.write(f"**Text:** {text_content[:100]}{'...' if len(text_content) > 100 else ''}")
                     if os.path.exists(audio_path):
-                        st.audio(audio_path, format="audio/wav")
+                        if audio_path.startswith("s3://"):
+                            try:
+                                url = generate_presigned_url(audio_path)
+                                st.audio(url, format="audio/wav")
+                            except Exception as e:
+                                st.error(f"Could not load audio: {e}")
+                        else:
+                            st.audio(audio_path, format="audio/wav")
+
                     st.write(f"**Status:** {status}")
                     st.write(f"**Created:** {created_at}")
         else:
@@ -1401,7 +1428,14 @@ def run_streamlit_app() -> None:
                             st.write(f"**Text:** {text_content[:100]}{'...' if len(text_content) > 100 else ''}")
                             if audio_path:
                                 # S3 URL support (Streamlit handles it natively)
-                                st.audio(audio_path, format="audio/wav")
+                                if audio_path.startswith("s3://"):
+                                    try:
+                                        url = generate_presigned_url(audio_path)
+                                        st.audio(url, format="audio/wav")
+                                    except Exception as e:
+                                        st.error(f"Could not load audio: {e}")
+                                else:
+                                    st.audio(audio_path, format="audio/wav")
                             st.write(f"**Status:** {status}")
                             st.write(f"**Created:** {created_at}")
 
