@@ -541,20 +541,20 @@ def get_all_recordings_by_user(user_id: Optional[int] = None, db_path: str = DB_
             ORDER BY r.created_at DESC
         """)
     else:
-    # Regular users — now filter by username folder, not user_id
-    username = get_username_from_user_id(user_id)
+        # Regular users — now filter by username folder, not user_id
+        username = get_username_from_user_id(user_id)
 
-    pattern = f"%/{username}/audio/%"
+        pattern = f"%/{username}/audio/%"
 
-    c.execute("""
-        SELECT r.id, r.audio_file_path, r.hoppepper_job_id, r.status, r.created_at,
-               t.prompts, t.id as text_id, u.username
-        FROM recordings r
-        JOIN texts t ON r.text_id = t.id
-        LEFT JOIN users u ON t.user_id = u.id
-        WHERE r.audio_file_path LIKE ?
-        ORDER BY r.created_at DESC
-    """, (pattern,))
+        c.execute("""
+            SELECT r.id, r.audio_file_path, r.hoppepper_job_id, r.status, r.created_at,
+                t.prompts, t.id as text_id, u.username
+            FROM recordings r
+            JOIN texts t ON r.text_id = t.id
+            LEFT JOIN users u ON t.user_id = u.id
+            WHERE r.audio_file_path LIKE ?
+            ORDER BY r.created_at DESC
+        """, (pattern,))
 
 
     rows = c.fetchall()
