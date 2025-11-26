@@ -1230,6 +1230,8 @@ def run_streamlit_app() -> None:
                     # NEW: Determine S3 language folder from user's assigned language
                     # -------------------------
                     user_id = st.session_state["user_id"]
+                    username = st.session_state["username"]
+
 
                     user_language_folder = st.session_state.get("chosen_language")
                     if not user_language_folder:
@@ -1244,7 +1246,6 @@ def run_streamlit_app() -> None:
                     # -------------------------
                     # UPDATED S3 PATHS WITH LANGUAGE GROUPING
                     # -------------------------
-
                     audio_key = f"{user_language_folder}/{username}/audio/{base_name}.wav"
                     text_key  = f"{user_language_folder}/{username}/transcripts/{base_name}.txt"
 
