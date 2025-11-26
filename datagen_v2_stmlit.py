@@ -819,11 +819,16 @@ def run_streamlit_app() -> None:
         if verify:
             if totp.verify(code_input.strip()):
                 # Log admin in
-                st.session_state["user_id"] = st.session_state["pending_mfa_user_id"]
-                update_mfa_timestamp(user_id)
+                uid = st.session_state["pending_mfa_user_id"]
+                st.session_state["user_id"] = uid
+
+                # Correct MFA timestamp update
+                update_mfa_timestamp(uid)
+
                 st.session_state["username"] = st.session_state["pending_mfa_username"]
                 st.session_state["authenticated"] = True
                 st.session_state["is_admin"] = True
+
 
                 # Clear MFA temp state
                 st.session_state["mfa_stage"] = None
