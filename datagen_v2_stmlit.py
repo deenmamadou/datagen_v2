@@ -1194,26 +1194,30 @@ def run_streamlit_app() -> None:
                     )
 
 
+            # --- FIXED SUBMISSION LOGIC ---
+            new_audio_available = audio_bytes not in (None, b"", [], {}, ())
 
-            # --- SUBMISSION LOGIC ---
-            new_audio_available = audio_bytes is not None
+            # Never treat audio as duplicate unless SHA-256 matches
+            last_hash = st.session_state.get("last_submitted_audio_hash")
 
-            # Detect whether this audio is different from last submitted
-            last_audio = st.session_state.get("last_submitted_audio")
-            is_duplicate_audio = (last_audio == audio_bytes)
-
-            # Show preview of audio (if available)
             if audio_bytes:
+                import hashlib
+                current_hash = hashlib.sha256(audio_bytes).hexdigest()
+            else:
+                current_hash = None
+
+            is_duplicate_audio = (current_hash is not None and current_hash == last_hash)
+
+            # Preview audio if present
+            if audio_bytes not in (None, b""):
                 st.audio(audio_bytes, format="audio/wav")
 
-            # Disable mic at final screen
+            # Determine if submit button should be disabled
             if st.session_state.get("final_submitted", False):
                 submit_disabled = True
             else:
-                # Submit disabled if:
-                # 1) No audio
-                # 2) Audio same as previous submission
                 submit_disabled = (not new_audio_available) or is_duplicate_audio
+
 
             col1, col2, col3 = st.columns([2, 1, 2])
             with col2:
@@ -1240,8 +1244,8 @@ def run_streamlit_app() -> None:
 
                 save_recording(text_id, audio_s3_uri, "saved")
 
-                # Remember last audio to prevent double-submit
-                st.session_state["last_submitted_audio"] = audio_bytes
+                # Remember SHA256 instead of raw bytes
+                st.session_state["last_submitted_audio_hash"] = hashlib.sha256(audio_bytes).hexdigest()
 
                 # Advance to next recording
                 if st.session_state["current_text_index"] == len(st.session_state["text_ids"]) - 1:
