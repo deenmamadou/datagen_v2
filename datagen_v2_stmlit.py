@@ -1160,25 +1160,39 @@ def run_streamlit_app() -> None:
                     )
 
 
-            mic_disabled = st.session_state.get("final_submitted", False)
+            # Determine whether the mic should be active
+            is_final_screen = (
+                st.session_state["current_text_index"] == len(st.session_state["text_ids"]) - 1
+            )
+            mic_disabled = (is_final_screen and st.session_state.get("final_submitted", False))
 
-            if audio_recorder is not None:
-                col1, col2, col3 = st.columns([3, 2, 1.5])
-                with col2:
-                    if mic_disabled:
-                        st.warning("You've now completed the project! Thank you!")
-                        audio_bytes = None
-                    else:
-                        # Pure widget, no custom JS
-                        audio_bytes = audio_recorder(
-                            text="",
-                            recording_color="#e74c3c",
-                            neutral_color="#6c757d",
-                            icon_name="microphone",
-                            icon_size="6x",
-                        )
-            else:
-                audio_bytes = None
+            col1, col2, col3 = st.columns([3, 2, 1.5])
+            with col2:
+                if mic_disabled:
+                    # Render a DISABLED-LOOKING microphone, but DO NOT unmount the component
+                    st.warning("You've now completed the project! Thank you!")
+
+                    # Render a 'fake' mic button (non-functional) to preserve layout
+                    st.markdown("""
+                        <div style="opacity:0.35; pointer-events:none;">
+                            <button style="background:#555; color:#999; padding:15px; border-radius:50%; font-size:24px;">
+                                🎤
+                            </button>
+                        </div>
+                    """, unsafe_allow_html=True)
+
+                    audio_bytes = None
+
+                else:
+                    # Always render the real recorder component so JS stays mounted
+                    audio_bytes = audio_recorder(
+                        text="",
+                        recording_color="#e74c3c",
+                        neutral_color="#6c757d",
+                        icon_name="microphone",
+                        icon_size="6x",
+                    )
+
 
 
             # --- SUBMISSION LOGIC, GREEN BUTTON, NEW/ALREADY SUBMITTED CHECK ---
