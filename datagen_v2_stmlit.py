@@ -82,11 +82,20 @@ conn.execute("""
     CREATE TABLE IF NOT EXISTS progress (
         username TEXT PRIMARY KEY,
         step INTEGER,
-        audio BLOB
+        audio BLOB,
+        completed INTEGER DEFAULT 0
     )
 """)
+# Migration for older DBs that don't have 'completed' yet
+try:
+    conn.execute("ALTER TABLE progress ADD COLUMN completed INTEGER DEFAULT 0")
+except sqlite3.OperationalError:
+    # Column already exists
+    pass
+
 conn.commit()
 conn.close()
+
 
 
 # ---------------------------
@@ -409,28 +418,45 @@ def needs_mfa(user_id, hours=12, db_path=DB_PATH):
 
 def load_progress(user):
     conn = get_db_connection()
-    row = conn.execute("SELECT step, audio FROM progress WHERE username=?", (user,)).fetchone()
+    try:
+        # New schema: step, audio, completed
+        row = conn.execute(
+            "SELECT step, audio, COALESCE(completed, 0) FROM progress WHERE username=?",
+            (user,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        # Fallback for very old DB without 'completed'
+        row = conn.execute(
+            "SELECT step, audio FROM progress WHERE username=?",
+            (user,)
+        ).fetchone()
+        row = row + (0,) if row else None  # add completed=0
     conn.close()
 
     if row:
-        saved_step = row[0]
+        saved_step, audio_blob, completed = row
         st.session_state["current_text_index"] = saved_step
-        st.session_state["audio_bytes"] = row[1]
+        st.session_state["audio_bytes"] = audio_blob
+        st.session_state["final_submitted"] = bool(completed)
     else:
         st.session_state["current_text_index"] = 0
         st.session_state["audio_bytes"] = None
+        st.session_state["final_submitted"] = False
+
 
 
 def save_progress(user):
     conn = get_db_connection()
     step = st.session_state.get("current_text_index", 0)
     audio = st.session_state.get("audio_bytes")
+    completed = 1 if st.session_state.get("final_submitted", False) else 0
     conn.execute(
-        "REPLACE INTO progress (username, step, audio) VALUES (?, ?, ?)",
-        (user, step, audio)
+        "REPLACE INTO progress (username, step, audio, completed) VALUES (?, ?, ?, ?)",
+        (user, step, audio, completed)
     )
     conn.commit()
     conn.close()
+
 
     
 
@@ -1124,16 +1150,16 @@ def run_streamlit_app() -> None:
                         unsafe_allow_html=True
                     )
 
-
             mic_disabled = st.session_state.get("final_submitted", False)
 
             if audio_recorder is not None:
                 col1, col2, col3 = st.columns([3, 2, 1.5])
                 with col2:
                     if mic_disabled:
-                        st.warning("Recording is disabled — project is completed.")
+                        st.warning("You've now completed the project! Thank you!.")
                         audio_bytes = None
                     else:
+                        # Pure widget, no custom JS
                         audio_bytes = audio_recorder(
                             text="",
                             recording_color="#e74c3c",
@@ -1141,68 +1167,9 @@ def run_streamlit_app() -> None:
                             icon_name="microphone",
                             icon_size="6x",
                         )
-                    st.markdown("""
-                    <script>
-                        function extendSilenceTimeout() {
-                            const recorder = window.streamlitAudioRecorder;
-                            if (!recorder) {
-                                setTimeout(extendSilenceTimeout, 300);
-                                return;
-                            }
-
-                            // Increase silence auto-stop timeout (milliseconds)
-                            recorder.VAD_SILENCE_TIMEOUT = 44000;   // ← adjust this
-                            console.log("Updated VAD silence timeout:", recorder.VAD_SILENCE_TIMEOUT);
-                        }
-                        extendSilenceTimeout();
-                    </script>
-                    """, unsafe_allow_html=True)
-
-
-                    is_disabled = "true" if is_at_end else "false"
-                    st.markdown(f"""
-                        <script>
-                            (function() {{
-                                const isDisabled = {is_disabled};
-                                function findRecorderButton() {{
-                                    let btn = document.querySelector('button[data-testid*="audio"]');
-                                    if (btn) return btn;
-                                    const buttons = Array.from(document.querySelectorAll('button'));
-                                    for (let b of buttons) {{
-                                        const svg = b.querySelector('svg');
-                                        if (svg && b.offsetParent !== null) {{
-                                            return b;
-                                        }}
-                                    }}
-                                    return null;
-                                }}
-                                function setupBand() {{
-                                    const band = document.getElementById('record-band');
-                                    if (!band) return;
-                                    if (isDisabled) {{
-                                        band.onclick = function(e) {{
-                                            e.preventDefault(); e.stopPropagation(); return false;
-                                        }};
-                                        return;
-                                    }}
-                                    band.onclick = function(e) {{
-                                        e.preventDefault(); e.stopPropagation();
-                                        const btn = findRecorderButton();
-                                        if (btn) btn.click();
-                                        band.classList.add('recording');
-                                        setTimeout(function() {{
-                                            band.classList.remove('recording');
-                                        }}, 200);
-                                    }};
-                                }}
-                                setupBand();
-                                const observer = new MutationObserver(setupBand);
-                                observer.observe(document.body, {{childList: true, subtree: true, attributes: true}});
-                            }})();
-                        </script>
-                    """, unsafe_allow_html=True)
             else:
                 audio_bytes = None
+
 
             # --- SUBMISSION LOGIC, GREEN BUTTON, NEW/ALREADY SUBMITTED CHECK ---
             new_recording = False
