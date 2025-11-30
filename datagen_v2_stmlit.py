@@ -1156,7 +1156,7 @@ def run_streamlit_app() -> None:
                 col1, col2, col3 = st.columns([3, 2, 1.5])
                 with col2:
                     if mic_disabled:
-                        st.warning("You've now completed the project! Thank you!.")
+                        st.warning("")
                         audio_bytes = None
                     else:
                         # Pure widget, no custom JS
