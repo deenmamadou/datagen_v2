@@ -1144,11 +1144,21 @@ def run_streamlit_app() -> None:
                 col1, col2, col3 = st.columns([2, 1, 2])
                 with col2:
                     st.markdown(
-                        "<div style='text-align: center; font-size: 30px; font-weight: bold; color: green; padding: 20px;'>"
-                        "THE PROJECT IS NOW COMPLETED.<br>THANK YOU!"
-                        "</div>",
+                        """
+                        <div style="
+                            text-align: center;
+                            font-size: 36px;
+                            font-weight: bold;
+                            color: #00ff55;
+                            padding: 25px;
+                            border-radius: 10px;
+                        ">
+                            You've now completed the project! Thank you!
+                        </div>
+                        """,
                         unsafe_allow_html=True
                     )
+
 
             mic_disabled = st.session_state.get("final_submitted", False)
 
@@ -1156,7 +1166,7 @@ def run_streamlit_app() -> None:
                 col1, col2, col3 = st.columns([3, 2, 1.5])
                 with col2:
                     if mic_disabled:
-                        st.warning("")
+                        st.warning("You've now completed the project! Thank you!")
                         audio_bytes = None
                     else:
                         # Pure widget, no custom JS
