@@ -577,6 +577,10 @@ def get_username_from_user_id(user_id, db_path=DB_PATH):
 def run_streamlit_app() -> None:
     st.set_page_config(page_title="datagen_v2", layout="wide")
 
+    st.session_state.setdefault("final_extra_recording_allowed", True)
+    st.session_state.setdefault("final_extra_recording_done", False)
+
+
     # Ensure DB is ready
     init_db()
 
@@ -593,6 +597,7 @@ def run_streamlit_app() -> None:
         "pending_mfa_secret": None,
         "pending_mfa_user_id": None,
         "pending_mfa_username": None,
+        "final_submitted": False,
     }.items():
         st.session_state.setdefault(key, val)
 
@@ -1107,26 +1112,35 @@ def run_streamlit_app() -> None:
             st.markdown("---")
 
             is_at_end = st.session_state["current_text_index"] == len(st.session_state["text_ids"]) - 1
+            st.session_state.setdefault("final_submitted", False)
 
-            if is_at_end:
+            if is_at_end and st.session_state.get("final_submitted", False):
                 col1, col2, col3 = st.columns([2, 1, 2])
                 with col2:
                     st.markdown(
-                        "<div style='text-align: center; font-size: 24px; font-weight: bold; color: white; padding: 20px;'>The End</div>",
+                        "<div style='text-align: center; font-size: 30px; font-weight: bold; color: green; padding: 20px;'>"
+                        "THE PROJECT IS NOW COMPLETED.<br>THANK YOU!"
+                        "</div>",
                         unsafe_allow_html=True
                     )
+
+
+            mic_disabled = st.session_state.get("final_submitted", False)
 
             if audio_recorder is not None:
                 col1, col2, col3 = st.columns([3, 2, 1.5])
                 with col2:
-                    # No extra HTML around the widget, just the widget call:
-                    audio_bytes = audio_recorder(
-                        text="",  # no label, icon only
-                        recording_color="#e74c3c",
-                        neutral_color="#6c757d",
-                        icon_name="microphone",
-                        icon_size="6x",
-                    )
+                    if mic_disabled:
+                        st.warning("Recording is disabled — project is completed.")
+                        audio_bytes = None
+                    else:
+                        audio_bytes = audio_recorder(
+                            text="",
+                            recording_color="#e74c3c",
+                            neutral_color="#6c757d",
+                            icon_name="microphone",
+                            icon_size="6x",
+                        )
                     st.markdown("""
                     <script>
                         function extendSilenceTimeout() {
@@ -1213,6 +1227,10 @@ def run_streamlit_app() -> None:
                 else:
                     submit_disabled = True
 
+                # 🔵 If last text already submitted → completely disable Submit
+                if st.session_state.get("final_submitted", False):
+                    submit_disabled = True
+
                 if duplicate:
                     st.error("You have already submitted this exact recording for this text. Please record a new audio.")
 
@@ -1278,8 +1296,10 @@ def run_streamlit_app() -> None:
                     st.session_state["audio_submitted"] = True
                     st.session_state["prev_audio_bytes"] = audio_bytes
                     st.session_state["audio_bytes"] = None
-
-                    if not is_at_end:
+                    # If this is the last text, freeze recording after submission
+                    if is_at_end:
+                        st.session_state["final_submitted"] = True
+                    else:
                         st.session_state["current_text_index"] += 1
 
                     if st.session_state["current_text_index"] >= len(st.session_state["text_ids"]):
