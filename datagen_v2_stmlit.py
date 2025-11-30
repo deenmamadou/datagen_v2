@@ -1195,109 +1195,62 @@ def run_streamlit_app() -> None:
 
 
 
-            # --- SUBMISSION LOGIC, GREEN BUTTON, NEW/ALREADY SUBMITTED CHECK ---
-            new_recording = False
-            prev_bytes = st.session_state.get("prev_audio_bytes", None)
-            # Only allow submission for freshly captured new audio (not None, not identical to last submitted)
+            # --- SUBMISSION LOGIC ---
+            new_audio_available = audio_bytes is not None
+
+            # Detect whether this audio is different from last submitted
+            last_audio = st.session_state.get("last_submitted_audio")
+            is_duplicate_audio = (last_audio == audio_bytes)
+
+            # Show preview of audio (if available)
             if audio_bytes:
-                if prev_bytes is None or audio_bytes != prev_bytes:
-                    st.session_state["audio_submitted"] = False
-                st.session_state["audio_bytes"] = audio_bytes
                 st.audio(audio_bytes, format="audio/wav")
-                new_recording = not st.session_state.get("audio_submitted", False)
+
+            # Disable mic at final screen
+            if st.session_state.get("final_submitted", False):
+                submit_disabled = True
             else:
-                new_recording = False
+                # Submit disabled if:
+                # 1) No audio
+                # 2) Audio same as previous submission
+                submit_disabled = (not new_audio_available) or is_duplicate_audio
 
             col1, col2, col3 = st.columns([2, 1, 2])
             with col2:
-                submit_disabled = True
-                duplicate = False
-                if new_recording and audio_bytes:
-                    duplicate = recording_exists_for_text(text_id, audio_bytes)
-                    submit_disabled = duplicate or st.session_state.get("audio_submitted", False)
+                submit = st.button(
+                    "Submit",
+                    use_container_width=True,
+                    disabled=submit_disabled
+                )
+
+            if submit and new_audio_available and not is_duplicate_audio:
+                # --- SAVE AUDIO TO S3 ---
+                user_id = st.session_state["user_id"]
+                username = st.session_state["username"]
+                user_lang = st.session_state["chosen_language"]
+                text_number = st.session_state["current_text_index"] + 1
+
+                base_name = f"{language}_{user_id}_{text_number}"
+                audio_key = f"{user_lang}/{username}/audio/{base_name}.wav"
+                text_key  = f"{user_lang}/{username}/transcripts/{base_name}.txt"
+
+                # Upload audio bytes directly
+                audio_s3_uri = upload_bytes_to_s3(audio_bytes, audio_key)
+                upload_bytes_to_s3(text.encode("utf-8"), text_key)
+
+                save_recording(text_id, audio_s3_uri, "saved")
+
+                # Remember last audio to prevent double-submit
+                st.session_state["last_submitted_audio"] = audio_bytes
+
+                # Advance to next recording
+                if st.session_state["current_text_index"] == len(st.session_state["text_ids"]) - 1:
+                    st.session_state["final_submitted"] = True
                 else:
-                    submit_disabled = True
+                    st.session_state["current_text_index"] += 1
 
-                # 🔵 If last text already submitted → completely disable Submit
-                if st.session_state.get("final_submitted", False):
-                    submit_disabled = True
-
-                if duplicate:
-                    st.error("You have already submitted this exact recording for this text. Please record a new audio.")
-
-                submit_result = st.button("Submit", key="submit-btn", use_container_width=True, disabled=submit_disabled)
-
-                if submit_result and new_recording and not duplicate:
-
-                    # -------------------------
-                    # Build per-user directories
-                    # -------------------------
-                    user_id = st.session_state["user_id"]
-                    langcode = language  # from text_data tuple
-                    text_number = st.session_state["current_text_index"] + 1
-
-                    base_dir = f"recordings/user_{user_id}"
-                    audio_dir = f"{base_dir}/audio"
-                    txt_dir = f"{base_dir}/transcripts"
-                    os.makedirs(audio_dir, exist_ok=True)
-                    os.makedirs(txt_dir, exist_ok=True)
-
-                    # -------------------------
-                    # Unified filename
-                    # -------------------------
-                    base_name = f"{langcode}_{user_id}_{text_number}"
-
-                    # -------------------------
-                    # NEW: Determine S3 language folder from user's assigned language
-                    # -------------------------
-                    user_id = st.session_state["user_id"]
-                    username = st.session_state["username"]
-
-
-                    user_language_folder = st.session_state.get("chosen_language")
-                    if not user_language_folder:
-                        user_language_folder = "unassigned"   # fallback to avoid breaking uploads
-
-                    # Recording index (1-based)
-                    text_number = st.session_state["current_text_index"] + 1
-
-                    # Base filename, unchanged
-                    base_name = f"{language}_{user_id}_{text_number}"
-
-                    # -------------------------
-                    # UPDATED S3 PATHS WITH LANGUAGE GROUPING
-                    # -------------------------
-                    audio_key = f"{user_language_folder}/{username}/audio/{base_name}.wav"
-                    text_key  = f"{user_language_folder}/{username}/transcripts/{base_name}.txt"
-
-                    # Upload audio bytes directly
-                    audio_s3_uri = upload_bytes_to_s3(audio_bytes, audio_key)
-
-                    # Upload transcript text directly
-                    upload_bytes_to_s3(text.encode("utf-8"), text_key)
-
-                    # Save S3 path in DB
-                    save_recording(text_id, audio_s3_uri, "saved")
- 
-
-
-                    # -------------------------
-                    # Existing state logic stays the same
-                    # -------------------------
-                    st.session_state["audio_submitted"] = True
-                    st.session_state["prev_audio_bytes"] = audio_bytes
-                    st.session_state["audio_bytes"] = None
-                    # If this is the last text, freeze recording after submission
-                    if is_at_end:
-                        st.session_state["final_submitted"] = True
-                    else:
-                        st.session_state["current_text_index"] += 1
-
-                    if st.session_state["current_text_index"] >= len(st.session_state["text_ids"]):
-                        st.session_state["current_text_index"] = len(st.session_state["text_ids"]) - 1
-
-                    st.success("Recording submitted! Moving to the next script.")
-                    st.rerun()
+                st.success("Recording submitted!")
+                st.rerun()
 
     # User's own recordings section (for regular users)
     if not st.session_state.get("is_admin", False) and st.session_state.get("user_id"):
