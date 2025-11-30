@@ -1153,7 +1153,7 @@ def run_streamlit_app() -> None:
                             padding: 25px;
                             border-radius: 10px;
                         ">
-                            You've now completed the project! Thank you!
+                            
                         </div>
                         """,
                         unsafe_allow_html=True
