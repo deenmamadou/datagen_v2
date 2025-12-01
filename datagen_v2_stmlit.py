@@ -437,11 +437,12 @@ def load_progress(user):
         saved_step, audio_blob, completed = row
         st.session_state["current_text_index"] = saved_step
         st.session_state["audio_bytes"] = audio_blob
-        st.session_state["final_submitted"] = bool(completed)
+        st.session_state["user_completed"] = bool(completed)
+
     else:
         st.session_state["current_text_index"] = 0
         st.session_state["audio_bytes"] = None
-        st.session_state["final_submitted"] = False
+        st.session_state.get("user_completed", False)
 
 
 
@@ -449,7 +450,7 @@ def save_progress(user):
     conn = get_db_connection()
     step = st.session_state.get("current_text_index", 0)
     audio = st.session_state.get("audio_bytes")
-    completed = 1 if st.session_state.get("final_submitted", False) else 0
+    completed = 1 if st.session_state.get("user_completed", False) else 0
     conn.execute(
         "REPLACE INTO progress (username, step, audio, completed) VALUES (?, ?, ?, ?)",
         (user, step, audio, completed)
@@ -623,7 +624,6 @@ def run_streamlit_app() -> None:
         "pending_mfa_secret": None,
         "pending_mfa_user_id": None,
         "pending_mfa_username": None,
-        "final_submitted": False,
     }.items():
         st.session_state.setdefault(key, val)
 
@@ -1138,33 +1138,33 @@ def run_streamlit_app() -> None:
             st.markdown("---")
 
             is_at_end = st.session_state["current_text_index"] == len(st.session_state["text_ids"]) - 1
-            st.session_state.setdefault("final_submitted", False)
 
-            if is_at_end and st.session_state.get("final_submitted", False):
+            if is_at_end and st.session_state.get("user_completed", False):
                 col1, col2, col3 = st.columns([2, 1, 2])
                 with col2:
                     st.markdown(
                         """
                         <div style="
                             text-align: center;
-                            font-size: 36px;
+                            font-size: 40px;
                             font-weight: bold;
                             color: #00ff55;
-                            padding: 25px;
-                            border-radius: 10px;
+                            background: #003300;
+                            padding: 30px;
+                            border-radius: 12px;
                         ">
-                            
+                            You've now completed the project! Thank you!
                         </div>
                         """,
-                        unsafe_allow_html=True
+                        unsafe_allow_html=True,
                     )
-
+ 
 
             # Determine whether the mic should be active
             is_final_screen = (
                 st.session_state["current_text_index"] == len(st.session_state["text_ids"]) - 1
             )
-            mic_disabled = (is_final_screen and st.session_state.get("final_submitted", False))
+            mic_disabled = (is_final_screen and st.session_state.get("user_completed", False))
 
             col1, col2, col3 = st.columns([3, 2, 1.5])
             with col2:
@@ -1212,9 +1212,6 @@ def run_streamlit_app() -> None:
             if audio_bytes not in (None, b""):
                 st.audio(audio_bytes, format="audio/wav")
 
-            # Determine if submit button should be disabled
-            if st.session_state.get("final_submitted", False):
-                submit_disabled = True
             else:
                 submit_disabled = (not new_audio_available) or is_duplicate_audio
 
@@ -1249,9 +1246,12 @@ def run_streamlit_app() -> None:
 
                 # Advance to next recording
                 if st.session_state["current_text_index"] == len(st.session_state["text_ids"]) - 1:
-                    st.session_state["final_submitted"] = True
+                    st.session_state["user_completed"] = True
+                    save_progress(st.session_state["username"])
                 else:
                     st.session_state["current_text_index"] += 1
+                    save_progress(st.session_state["username"])
+
 
                 st.success("Recording submitted!")
                 st.rerun()
