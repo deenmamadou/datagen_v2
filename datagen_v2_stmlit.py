@@ -30,6 +30,11 @@ AWS_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
 AWS_REGION = os.getenv("AWS_REGION", "us-west-1")
 
+import os
+print("CWD =", os.getcwd())
+print("Looking for progress DB at:", os.path.abspath("user_progress.db"))
+print("Directory content:", os.listdir(os.getcwd()))
+
 
 def upload_bytes_to_s3(bytes_data: bytes, s3_key: str) -> str:
     """Uploads raw bytes directly to S3 without saving locally."""
@@ -73,7 +78,7 @@ import requests
 import sqlite3
 
 def get_db_connection():
-    conn = sqlite3.connect("user_progress.db")
+    conn = sqlite3.connect("user_progress_v2.db")
     return conn
 
 # Create table if it does not exist
