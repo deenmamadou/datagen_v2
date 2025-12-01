@@ -1213,13 +1213,12 @@ def run_streamlit_app() -> None:
 
             is_duplicate_audio = (current_hash is not None and current_hash == last_hash)
 
+            # Always compute submit_disabled
+            submit_disabled = (not new_audio_available) or is_duplicate_audio
+
             # Preview audio if present
             if audio_bytes not in (None, b""):
                 st.audio(audio_bytes, format="audio/wav")
-
-            else:
-                submit_disabled = (not new_audio_available) or is_duplicate_audio
-
 
             col1, col2, col3 = st.columns([2, 1, 2])
             with col2:
