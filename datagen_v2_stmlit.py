@@ -60,6 +60,20 @@ def upload_bytes_to_s3(bytes_data: bytes, s3_key: str) -> str:
         return None
 
 
+import threading
+
+def upload_async(audio_bytes, audio_key, text_key, text):
+    """
+    Performs audio + transcript upload in a separate background thread
+    so the UI does NOT freeze.
+    """
+    def _upload():
+        upload_bytes_to_s3(audio_bytes, audio_key)
+        upload_bytes_to_s3(text.encode("utf-8"), text_key)
+
+    threading.Thread(target=_upload, daemon=True).start()
+
+
 
 # --- Optional imports (Streamlit UI & mic recorder) ---
 HAS_STREAMLIT = True
@@ -1239,10 +1253,11 @@ def run_streamlit_app() -> None:
                 audio_key = f"{user_lang}/{username}/audio/{base_name}.wav"
                 text_key  = f"{user_lang}/{username}/transcripts/{base_name}.txt"
 
-                # Upload audio bytes directly
-                audio_s3_uri = upload_bytes_to_s3(audio_bytes, audio_key)
-                upload_bytes_to_s3(text.encode("utf-8"), text_key)
+                # Start async upload so UI does NOT freeze
+                upload_async(audio_bytes, audio_key, text_key, text)
 
+                # Save the *expected* S3 URI (UI doesn't wait for upload to finish)
+                audio_s3_uri = f"s3://{AWS_BUCKET_NAME}/{audio_key}"
                 save_recording(text_id, audio_s3_uri, "saved")
 
                 # Remember SHA256 instead of raw bytes
@@ -1394,14 +1409,20 @@ def run_streamlit_app() -> None:
             grouped = {}
             for rec in all_recordings:
                 rec_id, audio_path, job_id, status, created_at, text_content, text_id, username = rec
-                m = re.search(r"user_(\d+)", str(audio_path))
-                if m:
-                    uid = int(m.group(1))
-                    key = next((u[1] for u in users if u[0] == uid), f"user_{uid}")
-                else:
-                    key = username or "Unknown"
+                # Remove s3://bucket/ prefix if present
+                clean_path = audio_path.replace(f"s3://{AWS_BUCKET_NAME}/", "")
 
-                grouped.setdefault(key, []).append(rec)
+                # Match: <lang>/<username>/audio/...
+                match = re.match(r"([^/]+)/([^/]+)/audio/", clean_path)
+
+                if match:
+                    lang_folder = match.group(1)
+                    username_key = match.group(2)
+                else:
+                    username_key = username or "Unknown"
+
+                grouped.setdefault(username_key, []).append(rec)
+
 
             # Render group dropdowns
             for username, rec_list in grouped.items():
