@@ -25,15 +25,56 @@ import qrcode
 from io import BytesIO
 import re
 
+
+# --- Persistent DB via S3 ---
+DB_PATH = "/tmp/texts.db"
+PROGRESS_DB_PATH = "/tmp/user_progress_v2.db"
+
 AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
 AWS_REGION = os.getenv("AWS_REGION", "us-west-1")
 
+# Use the same bucket for DB persistence
+S3_DB_BUCKET = AWS_BUCKET_NAME
+
+# Store DBs under a "db/" prefix in your bucket
+S3_DB_PREFIX = "db"
+
+
 import os
 print("CWD =", os.getcwd())
 print("Looking for progress DB at:", os.path.abspath("user_progress.db"))
 print("Directory content:", os.listdir(os.getcwd()))
+
+def download_db_from_s3(s3_key, local_path):
+    s3 = boto3.client(
+        "s3",
+        aws_access_key_id=AWS_ACCESS_KEY,
+        aws_secret_access_key=AWS_SECRET_KEY,
+        region_name=AWS_REGION,
+    )
+    try:
+        s3.download_file(S3_DB_BUCKET, s3_key, local_path)
+        print(f"Downloaded {s3_key} from S3")
+    except Exception as e:
+        print(f"No existing {s3_key} in S3 — starting empty DB.")
+
+
+# Download both DBs before initializing
+download_db_from_s3(f"{S3_DB_PREFIX}/texts.db", DB_PATH)
+download_db_from_s3(f"{S3_DB_PREFIX}/user_progress_v2.db", PROGRESS_DB_PATH)
+
+
+def upload_db_to_s3(local_path, s3_key):
+    s3 = boto3.client(
+        "s3",
+        aws_access_key_id=AWS_ACCESS_KEY,
+        aws_secret_access_key=AWS_SECRET_KEY,
+        region_name=AWS_REGION,
+    )
+    s3.upload_file(local_path, S3_DB_BUCKET, s3_key)
+
 
 
 def upload_bytes_to_s3(bytes_data: bytes, s3_key: str) -> str:
@@ -92,8 +133,9 @@ import requests
 import sqlite3
 
 def get_db_connection():
-    conn = sqlite3.connect("user_progress_v2.db")
+    conn = sqlite3.connect(PROGRESS_DB_PATH)
     return conn
+
 
 # Create table if it does not exist
 conn = get_db_connection()
@@ -120,8 +162,9 @@ conn.close()
 # ---------------------------
 # Database setup & helpers
 # ---------------------------
-DB_PATH = "texts.db"
-
+# Local paths (stored in /tmp/ so they restart clean each session)
+DB_PATH = "/tmp/texts.db"
+PROGRESS_DB_PATH = "/tmp/user_progress_v2.db"
 
 def init_db(db_path: str = DB_PATH) -> None:
     conn = sqlite3.connect(db_path)
@@ -303,6 +346,9 @@ def add_text(text: str, language: str = "ar", is_rtl: bool = True,
     conn.commit()
     text_id = c.lastrowid
     conn.close()
+
+    upload_db_to_s3(DB_PATH, f"{S3_DB_PREFIX}/texts.db")
+
     return text_id
 
 
@@ -435,6 +481,7 @@ def needs_mfa(user_id, hours=12, db_path=DB_PATH):
     return diff.total_seconds() > hours * 3600
 
 
+
 def load_progress(user):
     conn = get_db_connection()
     try:
@@ -470,12 +517,17 @@ def save_progress(user):
     step = st.session_state.get("current_text_index", 0)
     audio = st.session_state.get("audio_bytes")
     completed = 1 if st.session_state.get("user_completed", False) else 0
+
     conn.execute(
         "REPLACE INTO progress (username, step, audio, completed) VALUES (?, ?, ?, ?)",
         (user, step, audio, completed)
     )
     conn.commit()
     conn.close()
+
+    # Upload DB to S3
+    upload_db_to_s3(PROGRESS_DB_PATH, f"{S3_DB_PREFIX}/user_progress_v2.db")
+
 
 
     
@@ -551,6 +603,10 @@ def save_recording(
     conn.commit()
     recording_id = c.lastrowid
     conn.close()
+
+    upload_db_to_s3(DB_PATH, f"{S3_DB_PREFIX}/texts.db")
+
+
     return recording_id
 
 def update_recording_status(recording_id: int, status: str, db_path: str = DB_PATH) -> None:
