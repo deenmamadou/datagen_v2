@@ -26,10 +26,6 @@ from io import BytesIO
 import re
 
 
-# --- Persistent DB via S3 ---
-DB_PATH = "/tmp/texts.db"
-PROGRESS_DB_PATH = "/tmp/user_progress_v2.db"
-
 AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
@@ -1066,8 +1062,14 @@ def run_streamlit_app() -> None:
 
                 if uploaded_file is not None:
                     try:
-                        content = uploaded_file.read().decode("utf-8")
-                        lines = [line.strip() for line in content.split("\n") if line.strip()]
+                        import csv
+                        decoded = uploaded_file.read().decode("utf-8").splitlines()
+                        reader = csv.reader(decoded)
+
+                        lines = []
+                        for row in reader:
+                            if row and row[0].strip():   # ensure non-empty first column
+                                lines.append(row[0].strip())
 
                         language = st.selectbox("Language", ["ar", "ar-AE",  "ar-SA", "ar-QA", "ar-KW", "ar-SY", 
                         "ar-LB", "ar-PS", "ar-JO", "ar-EG", "ar-SD", "ar-TD", "ar-MA", "ar-DZ", "ar-TN", "he", "fa", "ur"], index=0,
@@ -1126,6 +1128,10 @@ def run_streamlit_app() -> None:
                         c.execute("DELETE FROM texts WHERE source_file=?", (chosen_file,))
                         conn.commit()
                         conn.close()
+
+                        # ⬅️ Required for persistence
+                        upload_db_to_s3(DB_PATH, f"{S3_DB_PREFIX}/texts.db")
+
                         st.success(f"Deleted all entries from file '{chosen_file}'.")
                         st.rerun()
 
