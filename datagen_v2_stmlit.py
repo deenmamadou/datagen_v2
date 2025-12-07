@@ -1460,7 +1460,7 @@ def run_streamlit_app() -> None:
 
 
         st.markdown("---")
-        st.subheader("Admin: All Recordings (Grouped by User)")
+        st.subheader("All Recordings")
 
         all_recordings = get_all_recordings_by_user(user_id=None)
 
