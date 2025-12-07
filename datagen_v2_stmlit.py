@@ -26,6 +26,10 @@ from io import BytesIO
 import re
 
 
+# --- Persistent DB via S3 ---
+DB_PATH = "/tmp/texts.db"
+PROGRESS_DB_PATH = "/tmp/user_progress_v2.db"
+
 AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
@@ -158,10 +162,6 @@ conn.close()
 # ---------------------------
 # Database setup & helpers
 # ---------------------------
-# Local paths (stored in /tmp/ so they restart clean each session)
-DB_PATH = "/tmp/texts.db"
-PROGRESS_DB_PATH = "/tmp/user_progress_v2.db"
-
 def init_db(db_path: str = DB_PATH) -> None:
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
