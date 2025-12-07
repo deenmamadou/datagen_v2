@@ -387,6 +387,9 @@ def save_user_language(user_id, language, db_path=DB_PATH):
     conn.commit()
     conn.close()
 
+    # 🚀 NEW: persist updated DB to S3
+    upload_db_to_s3(DB_PATH, f"{S3_DB_PREFIX}/texts.db")
+
 def ensure_user_dirs(user_id):
     base = f"recordings/user_{user_id}"
     audio_dir = f"{base}/audio"
@@ -1185,11 +1188,28 @@ def run_streamlit_app() -> None:
 
     # ---- FIRST-TIME LANGUAGE SELECTION (MAIN AREA) ----
     if st.session_state.get("authenticated", False) and not st.session_state.get("is_admin", False):
-        if st.session_state.get("chosen_language") is None:
-            st.markdown("### Welcome to datagen_v2")
-            st.write("Your account has been created successfully.")
-            st.info("Please contact your admin to be assigned a language before you can begin recording.")
-            return
+        # ---- FIRST-TIME LANGUAGE SELECTION (MAIN AREA) ----
+        if st.session_state.get("authenticated", False) and not st.session_state.get("is_admin", False):
+
+            # Always fetch latest language from DB to allow live admin updates  
+            latest_lang = get_user_language(st.session_state["user_id"])
+            st.session_state["chosen_language"] = latest_lang
+
+            if latest_lang is None:
+                st.markdown("### Welcome to datagen_v2")
+                st.write("Your account has been created successfully.")
+                st.info("Please contact your admin to be assigned a language before you can begin recording.")
+                return
+
+            # Load texts immediately when language becomes available
+            texts = get_all_texts(db_path=DB_PATH)
+            lang_texts = [t for t in texts if t[2] == latest_lang]
+            st.session_state["text_ids"] = [t[0] for t in lang_texts]
+
+            # Safety check on index bounds
+            idx = st.session_state.get("current_text_index", 0)
+            if idx >= len(st.session_state["text_ids"]):
+                st.session_state["current_text_index"] = 0
 
 
     # Main prompt UI as before, but the prompts are now filtered by chosen language
