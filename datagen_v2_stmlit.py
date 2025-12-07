@@ -1494,22 +1494,25 @@ def run_streamlit_app() -> None:
         if not all_recordings:
             st.info("No recordings found in the system.")
         else:
-            # Group by username
+            # --- Clean, Robust Grouping for Admin View ---
             grouped = {}
+
             for rec in all_recordings:
-                rec_id, audio_path, job_id, status, created_at, text_content, text_id, username = rec
-                # Remove s3://bucket/ prefix if present
-                clean_path = audio_path.replace(f"s3://{AWS_BUCKET_NAME}/", "")
+                rec_id, audio_path, job_id, status, created_at, text_content, text_id, username_from_db = rec
 
-                # Match: <lang>/<username>/audio/...
-                match = re.match(r"([^/]+)/([^/]+)/audio/", clean_path)
+                # 1. Try extracting username from S3 path
+                extracted_username = None
+                if audio_path and audio_path.startswith("s3://"):
+                    clean = audio_path.replace(f"s3://{AWS_BUCKET_NAME}/", "")
+                    # Expect:   lang/username/audio/file.wav
+                    parts = clean.split("/")
+                    if len(parts) >= 3:
+                        extracted_username = parts[1]
 
-                if match:
-                    lang_folder = match.group(1)
-                    username_key = match.group(2)
-                else:
-                    username_key = username or "Unknown"
+                # 2. Fallback: use username stored in DB (from JOIN)
+                username_key = extracted_username or username_from_db or "Unknown"
 
+                # 3. Add to its group
                 grouped.setdefault(username_key, []).append(rec)
 
 
