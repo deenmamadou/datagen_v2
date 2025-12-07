@@ -348,7 +348,6 @@ def add_text(text: str, language: str = "ar", is_rtl: bool = True,
     return text_id
 
 
-
 def create_user(username: str, password: str, db_path: str = DB_PATH) -> Optional[int]:
     """Create a new user. Returns user_id if successful, None if username already exists."""
     import hashlib
@@ -360,10 +359,18 @@ def create_user(username: str, password: str, db_path: str = DB_PATH) -> Optiona
         conn.commit()
         user_id = c.lastrowid
         conn.close()
+
+        # 🚀 NEW — persist user DB to S3
+        upload_db_to_s3(DB_PATH, f"{S3_DB_PREFIX}/texts.db")
+
         return user_id
+
     except sqlite3.IntegrityError:
         conn.close()
         return None
+
+
+
 
 def get_user_language(user_id, db_path=DB_PATH):
     conn = sqlite3.connect(db_path)
