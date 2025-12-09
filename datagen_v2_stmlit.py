@@ -967,6 +967,8 @@ def run_streamlit_app() -> None:
 
                 # Correct MFA timestamp update
                 update_mfa_timestamp(uid)
+                upload_db_to_s3(DB_PATH, f"{S3_DB_PREFIX}/texts.db")
+
 
                 st.session_state["username"] = st.session_state["pending_mfa_username"]
                 st.session_state["authenticated"] = True
@@ -1188,28 +1190,29 @@ def run_streamlit_app() -> None:
 
     # ---- FIRST-TIME LANGUAGE SELECTION (MAIN AREA) ----
     if st.session_state.get("authenticated", False) and not st.session_state.get("is_admin", False):
-        # ---- FIRST-TIME LANGUAGE SELECTION (MAIN AREA) ----
-        if st.session_state.get("authenticated", False) and not st.session_state.get("is_admin", False):
 
-            # Always fetch latest language from DB to allow live admin updates  
-            latest_lang = get_user_language(st.session_state["user_id"])
-            st.session_state["chosen_language"] = latest_lang
+        # Always refresh assigned language
+        latest_lang = get_user_language(st.session_state["user_id"])
+        st.session_state["chosen_language"] = latest_lang
 
-            if latest_lang is None:
-                st.markdown("### Welcome to datagen_v2")
-                st.write("Your account has been created successfully.")
-                st.info("Please contact your admin to be assigned a language before you can begin recording.")
-                return
+        if latest_lang is None:
+            st.markdown("### Welcome to datagen_v2")
+            st.write("Your account has been created successfully.")
+            st.info("Please contact your admin to be assigned a language before you can begin recording.")
+            return
 
-            # Load texts immediately when language becomes available
+        # Load texts ONLY if text_ids is empty
+        if not st.session_state.get("text_ids"):
             texts = get_all_texts(db_path=DB_PATH)
             lang_texts = [t for t in texts if t[2] == latest_lang]
             st.session_state["text_ids"] = [t[0] for t in lang_texts]
 
-            # Safety check on index bounds
-            idx = st.session_state.get("current_text_index", 0)
-            if idx >= len(st.session_state["text_ids"]):
-                st.session_state["current_text_index"] = 0
+            # index safety
+            st.session_state["current_text_index"] = min(
+                st.session_state.get("current_text_index", 0),
+                max(len(st.session_state["text_ids"]) - 1, 0)
+            )
+
 
 
     # Main prompt UI as before, but the prompts are now filtered by chosen language
