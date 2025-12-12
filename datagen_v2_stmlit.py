@@ -316,6 +316,32 @@ def init_db(db_path: str = DB_PATH) -> None:
     conn.commit()
     conn.close()
 
+def backfill_recording_users():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+
+    c.execute("SELECT id, audio_file_path FROM recordings WHERE user_id IS NULL")
+    rows = c.fetchall()
+
+    for rid, path in rows:
+        if path and path.startswith("s3://"):
+            clean = path.replace(f"s3://{AWS_BUCKET_NAME}/", "")
+            parts = clean.split("/")
+            if len(parts) >= 3:
+                username = parts[1]
+                c.execute("SELECT id FROM users WHERE username=?", (username,))
+                row = c.fetchone()
+                if row:
+                    c.execute(
+                        "UPDATE recordings SET user_id=? WHERE id=?",
+                        (row[0], rid)
+                    )
+
+    conn.commit()
+    conn.close()
+    upload_db_to_s3(DB_PATH, f"{S3_DB_PREFIX}/texts.db")
+
+
 def get_all_users(db_path=DB_PATH):
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
@@ -728,39 +754,31 @@ def save_recording(
     status: str = "saved",
     db_path: str = DB_PATH,
 ) -> int:
-    """
-    Save recording metadata, including NEW duration_seconds column (if present).
-    """
 
-    # --- Extract duration if the file is stored in S3 ---
     duration_seconds = None
     try:
         if audio_file_path.startswith("s3://"):
             size = get_s3_file_size(audio_file_path)
             duration_seconds = estimate_wav_duration_seconds(size)
-        else:
-            # local file fallback
-            size = os.path.getsize(audio_file_path)
-            duration_seconds = estimate_wav_duration_seconds(size)
     except Exception:
-        duration_seconds = None  # fallback
+        pass
 
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
 
-    # NEW insert with duration_seconds
+    user_id = st.session_state.get("user_id")
+
     try:
         c.execute(
             """
-            INSERT INTO recordings (text_id, audio_file_path, hoppepper_job_id, status, duration_seconds)
-            VALUES (?, ?, NULL, ?, ?)
+            INSERT INTO recordings
+                (text_id, audio_file_path, hoppepper_job_id, status, duration_seconds, user_id)
+            VALUES (?, ?, NULL, ?, ?, ?)
             """,
-                user_id = st.session_state["user_id"]
-
-                (text_id, audio_file_path, status, duration_seconds, user_id)
+            (text_id, audio_file_path, status, duration_seconds, user_id)
         )
     except sqlite3.OperationalError:
-        # Column doesn't exist in some older DBs – fallback to original insert
+        # Backward compatibility
         c.execute(
             """
             INSERT INTO recordings (text_id, audio_file_path, hoppepper_job_id, status)
@@ -770,11 +788,11 @@ def save_recording(
         )
 
     conn.commit()
-    recording_id = c.lastrowid
+    rid = c.lastrowid
     conn.close()
 
     upload_db_to_s3(DB_PATH, f"{S3_DB_PREFIX}/texts.db")
-    return recording_id
+    return rid
 
 
 def update_recording_status(recording_id: int, status: str, db_path: str = DB_PATH) -> None:
