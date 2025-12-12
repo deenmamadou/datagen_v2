@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Callable, Optional, Tuple, List
 import hashlib
 import pyotp
-import sqlite3
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 import qrcode
@@ -42,43 +41,9 @@ S3_DB_BUCKET = AWS_BUCKET_NAME
 S3_DB_PREFIX = "db"
 
 
-import os
 print("CWD =", os.getcwd())
 print("Looking for progress DB at:", os.path.abspath("user_progress.db"))
 print("Directory content:", os.listdir(os.getcwd()))
-
-
-def get_s3_file_size(s3_uri: str) -> int:
-    """
-    Returns size in bytes of an S3 object.
-    """
-    try:
-        bucket = AWS_BUCKET_NAME
-        key = s3_uri.replace(f"s3://{bucket}/", "")
-
-        s3 = boto3.client(
-            "s3",
-            aws_access_key_id=AWS_ACCESS_KEY,
-            aws_secret_access_key=AWS_SECRET_KEY,
-            region_name=AWS_REGION,
-        )
-
-        response = s3.head_object(Bucket=bucket, Key=key)
-        return response["ContentLength"]  # bytes
-
-    except Exception:
-        return 0
-
-
-def estimate_wav_duration_seconds(file_size_bytes: int) -> float:
-    """
-    Audio-recorder-streamlit produces 16-bit PCM, 32k bytes/sec.
-    """
-    if file_size_bytes <= 0:
-        return 0.0
-
-    BYTES_PER_SECOND = 32000
-    return file_size_bytes / BYTES_PER_SECOND
 
 
 def download_db_from_s3(s3_key, local_path):
@@ -593,7 +558,7 @@ def load_progress(user):
     else:
         st.session_state["current_text_index"] = 0
         st.session_state["audio_bytes"] = None
-        st.session_state.get("user_completed", False)
+        st.session_state["user_completed"] = False
 
 
 
@@ -829,13 +794,21 @@ def get_all_recordings_by_user(user_id: Optional[int] = None, db_path: str = DB_
     if user_id is None:
         # Admin sees ALL recordings
         c.execute("""
-            SELECT r.id, r.audio_file_path, r.hoppepper_job_id, r.status, r.created_at,
-                   t.prompts, t.id as text_id, u.username
+            SELECT r.id,
+                r.audio_file_path,
+                r.hoppepper_job_id,
+                r.status,
+                r.created_at,
+                t.prompts,
+                t.id AS text_id,
+                u.username,
+                r.duration_seconds
             FROM recordings r
-            JOIN texts t ON r.text_id = t.id
+            LEFT JOIN texts t ON r.text_id = t.id
             LEFT JOIN users u ON t.user_id = u.id
             ORDER BY r.created_at DESC
         """)
+
     else:
         # Regular users — now filter by username folder, not user_id
         username = get_username_from_user_id(user_id)
@@ -843,14 +816,22 @@ def get_all_recordings_by_user(user_id: Optional[int] = None, db_path: str = DB_
         pattern = f"%/{username}/audio/%"
 
         c.execute("""
-            SELECT r.id, r.audio_file_path, r.hoppepper_job_id, r.status, r.created_at,
-                t.prompts, t.id as text_id, u.username
+            SELECT r.id,
+                r.audio_file_path,
+                r.hoppepper_job_id,
+                r.status,
+                r.created_at,
+                t.prompts,
+                t.id AS text_id,
+                u.username,
+                r.duration_seconds
             FROM recordings r
             JOIN texts t ON r.text_id = t.id
             LEFT JOIN users u ON t.user_id = u.id
             WHERE r.audio_file_path LIKE ?
             ORDER BY r.created_at DESC
         """, (pattern,))
+
 
 
     rows = c.fetchall()
@@ -980,12 +961,6 @@ def run_streamlit_app() -> None:
                         st.session_state["authenticated"] = True
                         st.session_state["is_admin"] = False
 
-
-                        # -------- Regular user: no MFA --------
-                        st.session_state["user_id"] = user_id
-                        st.session_state["username"] = username
-                        st.session_state["authenticated"] = True
-                        st.session_state["is_admin"] = False
 
                         # Load language + progress as you already do
                         user_lang = get_user_language(user_id)
@@ -1613,29 +1588,28 @@ def run_streamlit_app() -> None:
 
         if user_recordings:
             for local_num, rec in indexed_records:
-                rec_id, audio_path, job_id, status, created_at, text_content, text_id, username = rec
+                rec_id, audio_path, job_id, status, created_at, text_content, text_id, username, duration_seconds = rec
 
                 with st.expander(f"Recording {local_num} - {created_at} | Status: {status}"):
                     st.write(f"**Text ID:** {text_id}")
                     st.write(f"**Text:** {text_content[:100]}{'...' if len(text_content) > 100 else ''}")
-                    if os.path.exists(audio_path):
-                        if audio_path:
-                            if audio_path.startswith("s3://"):
-                                # S3 object – generate a presigned URL
-                                try:
-                                    url = generate_presigned_url(audio_path)
-                                    st.audio(url, format="audio/wav")
-                                except Exception as e:
-                                    st.error(f"Could not load audio from S3: {e}")
+                    if audio_path:
+                        if audio_path.startswith("s3://"):
+                            # S3 object – generate a presigned URL
+                            try:
+                                url = generate_presigned_url(audio_path)
+                                st.audio(url, format="audio/wav")
+                            except Exception as e:
+                                st.error(f"Could not load audio from S3: {e}")
+                        else:
+                            # Local file – check existence
+                            if os.path.exists(audio_path):
+                                st.audio(audio_path, format="audio/wav")
                             else:
-                                # Local file – check existence
-                                if os.path.exists(audio_path):
-                                    st.audio(audio_path, format="audio/wav")
-                                else:
-                                    st.warning(f"Audio file not found: {audio_path}")
+                                st.warning(f"Audio file not found: {audio_path}")
 
-                    st.write(f"**Status:** {status}")
-                    st.write(f"**Created:** {created_at}")
+                st.write(f"**Status:** {status}")
+                st.write(f"**Created:** {created_at}")
         else:
             st.info("You haven't made any recordings yet.")
 
@@ -1733,13 +1707,21 @@ def run_streamlit_app() -> None:
         c = conn.cursor()
 
         c.execute("""
-            SELECT r.id, r.audio_file_path, r.hoppepper_job_id, r.status, r.created_at,
-                t.prompts, t.id AS text_id, u.username
+            SELECT r.id,
+                r.audio_file_path,
+                r.hoppepper_job_id,
+                r.status,
+                r.created_at,
+                t.prompts,
+                t.id AS text_id,
+                u.username,
+                r.duration_seconds
             FROM recordings r
             LEFT JOIN texts t ON r.text_id = t.id
             LEFT JOIN users u ON t.user_id = u.id
             ORDER BY r.created_at DESC
         """)
+
 
         all_recordings = c.fetchall()
         conn.close()
@@ -1771,13 +1753,14 @@ def run_streamlit_app() -> None:
             # -----------------------------------------
             # TOTAL HOURS FOR ALL USERS (Admin Summary)
             # -----------------------------------------
-            global_total_seconds = 0
+            global_total_seconds = 0.0
 
             for rec in all_recordings:
-                rec_id, audio_path, job_id, status, created_at, text_content, text_id, username_from_db = rec
-                if audio_path and audio_path.startswith("s3://"):
-                    size = get_s3_file_size(audio_path)
-                    global_total_seconds += estimate_wav_duration_seconds(size)
+                rec_id, audio_path, job_id, status, created_at, text_content, text_id, username_from_db, 
+                duration_seconds = rec
+                if duration_seconds is not None:
+                    global_total_seconds += float(duration_seconds)
+
 
             global_total_hours = global_total_seconds / 3600.0
 
@@ -1789,15 +1772,13 @@ def run_streamlit_app() -> None:
             # Render group dropdowns
             for username, rec_list in grouped.items():
 
-                # --- Compute total audio duration ---
-                total_seconds = 0
+                total_seconds = 0.0
 
                 for rec in rec_list:
-                    rec_id, audio_path, job_id, status, created_at, text_content, text_id, username_from_db = rec
+                    rec_id, audio_path, job_id, status, created_at, text_content, text_id, username, duration_seconds = rec
+                    if duration_seconds is not None:
+                        total_seconds += float(duration_seconds)
 
-                    if audio_path and audio_path.startswith("s3://"):
-                        size = get_s3_file_size(audio_path)
-                        total_seconds += estimate_wav_duration_seconds(size)
 
                 total_hours = total_seconds / 3600.0
 
@@ -1806,7 +1787,7 @@ def run_streamlit_app() -> None:
 
                     # Inside each dropdown, list that user's recordings
                     for rec in rec_list:
-                        rec_id, audio_path, job_id, status, created_at, text_content, text_id, username = rec
+                        rec_id, audio_path, job_id, status, created_at, text_content, text_id, username, duration_seconds = rec
 
                         with st.expander(f"Recording {rec_id} — {created_at} | Status: {status}"):
 
