@@ -794,7 +794,8 @@ def get_all_recordings_by_user(user_id: Optional[int] = None, db_path: str = DB_
     if user_id is None:
         # Admin sees ALL recordings
         c.execute("""
-            SELECT r.id,
+            SELECT 
+                r.id,
                 r.audio_file_path,
                 r.hoppepper_job_id,
                 r.status,
@@ -816,7 +817,8 @@ def get_all_recordings_by_user(user_id: Optional[int] = None, db_path: str = DB_
         pattern = f"%/{username}/audio/%"
 
         c.execute("""
-            SELECT r.id,
+            SELECT 
+                r.id,
                 r.audio_file_path,
                 r.hoppepper_job_id,
                 r.status,
@@ -1707,7 +1709,8 @@ def run_streamlit_app() -> None:
         c = conn.cursor()
 
         c.execute("""
-            SELECT r.id,
+            SELECT 
+                r.id,
                 r.audio_file_path,
                 r.hoppepper_job_id,
                 r.status,
@@ -1733,7 +1736,20 @@ def run_streamlit_app() -> None:
             grouped = {}
 
             for rec in all_recordings:
-                rec_id, audio_path, job_id, status, created_at, text_content, text_id, username_from_db, duration_seconds = rec
+                if len(rec) != 9:
+                    continue  # skip malformed rows
+
+                (
+                    rec_id,
+                    audio_path,
+                    job_id,
+                    status,
+                    created_at,
+                    text_content,
+                    text_id,
+                    username_from_db,
+                    duration_seconds,
+                ) = rec
 
                 # 1. Try extracting username from S3 path
                 extracted_username = None
@@ -1756,12 +1772,22 @@ def run_streamlit_app() -> None:
             global_total_seconds = 0.0
 
             for rec in all_recordings:
-                rec_id, audio_path, job_id, status, created_at, text_content, text_id, username_from_db, 
-                duration_seconds = rec
-                if duration_seconds is not None:
-                    if duration_seconds:
-                        global_total_seconds += float(duration_seconds)
+                (
+                    rec_id,
+                    audio_path,
+                    job_id,
+                    status,
+                    created_at,
+                    text_content,
+                    text_id,
+                    username_from_db,
+                    duration_seconds,
+                ) = rec
 
+                try:
+                    global_total_seconds += float(duration_seconds or 0)
+                except (TypeError, ValueError):
+                    pass
 
 
             global_total_hours = global_total_seconds / 3600.0
@@ -1806,8 +1832,8 @@ def run_streamlit_app() -> None:
                                 else:
                                     st.audio(audio_path, format="audio/wav")
 
-                            st.write(f"**Status:** {status}")
-                            st.write(f"**Created:** {created_at}")
+                        st.write(f"**Status:** {status}")
+                        st.write(f"**Created:** {created_at}")
 
             # --- End of Section 3 ---
 
