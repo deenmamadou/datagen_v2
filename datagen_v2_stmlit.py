@@ -259,6 +259,13 @@ def init_db(db_path: str = DB_PATH) -> None:
     except sqlite3.OperationalError:
         pass  # column already exists
 
+    try:
+        c.execute("ALTER TABLE recordings ADD COLUMN duration_seconds REAL")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
+    
+
 
     c.execute(
         """
@@ -718,29 +725,83 @@ def generate_presigned_url(s3_uri: str, expires=300):
     )
 
 
+def get_s3_file_size(s3_uri: str) -> int:
+    """Return file size (bytes) for an S3 object."""
+    bucket = AWS_BUCKET_NAME
+    key = s3_uri.replace(f"s3://{bucket}/", "")
+
+    s3 = boto3.client(
+        "s3",
+        aws_access_key_id=AWS_ACCESS_KEY,
+        aws_secret_access_key=AWS_SECRET_KEY,
+        region_name=AWS_REGION,
+    )
+
+    resp = s3.head_object(Bucket=bucket, Key=key)
+    return resp["ContentLength"]
+
+
+def estimate_wav_duration_seconds(size_bytes: int) -> float:
+    """
+    Estimate WAV duration using PCM 16-bit mono 16 kHz assumption.
+    If you use a different sample rate, tell me and I'll adjust it.
+    """
+    bytes_per_second = 16000 * 2  # sample_rate * bytes_per_sample
+    return size_bytes / bytes_per_second
+
+
 def save_recording(
     text_id: int,
     audio_file_path: str,
     status: str = "saved",
     db_path: str = DB_PATH,
 ) -> int:
+    """
+    Save recording metadata, including NEW duration_seconds column (if present).
+    """
+
+    # --- Extract duration if the file is stored in S3 ---
+    duration_seconds = None
+    try:
+        if audio_file_path.startswith("s3://"):
+            size = get_s3_file_size(audio_file_path)
+            duration_seconds = estimate_wav_duration_seconds(size)
+        else:
+            # local file fallback
+            size = os.path.getsize(audio_file_path)
+            duration_seconds = estimate_wav_duration_seconds(size)
+    except Exception:
+        duration_seconds = None  # fallback
+
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
-    c.execute(
-        """
-        INSERT INTO recordings (text_id, audio_file_path, hoppepper_job_id, status)
-        VALUES (?, ?, NULL, ?)
-        """,
-        (text_id, audio_file_path, status),
-    )
+
+    # NEW insert with duration_seconds
+    try:
+        c.execute(
+            """
+            INSERT INTO recordings (text_id, audio_file_path, hoppepper_job_id, status, duration_seconds)
+            VALUES (?, ?, NULL, ?, ?)
+            """,
+            (text_id, audio_file_path, status, duration_seconds),
+        )
+    except sqlite3.OperationalError:
+        # Column doesn't exist in some older DBs – fallback to original insert
+        c.execute(
+            """
+            INSERT INTO recordings (text_id, audio_file_path, hoppepper_job_id, status)
+            VALUES (?, ?, NULL, ?)
+            """,
+            (text_id, audio_file_path, status),
+        )
+
     conn.commit()
     recording_id = c.lastrowid
     conn.close()
 
     upload_db_to_s3(DB_PATH, f"{S3_DB_PREFIX}/texts.db")
-
-
     return recording_id
+
 
 def update_recording_status(recording_id: int, status: str, db_path: str = DB_PATH) -> None:
     conn = sqlite3.connect(db_path)
@@ -1667,7 +1728,21 @@ def run_streamlit_app() -> None:
         st.markdown("---")
         st.subheader("All Recordings")
 
-        all_recordings = get_all_recordings_by_user(user_id=None)
+        # Fully explicit JOIN so admin always sees all recordings
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+
+        c.execute("""
+            SELECT r.id, r.audio_file_path, r.hoppepper_job_id, r.status, r.created_at,
+                t.prompts, t.id AS text_id, u.username
+            FROM recordings r
+            LEFT JOIN texts t ON r.text_id = t.id
+            LEFT JOIN users u ON t.user_id = u.id
+            ORDER BY r.created_at DESC
+        """)
+
+        all_recordings = c.fetchall()
+        conn.close()
 
         if not all_recordings:
             st.info("No recordings found in the system.")
