@@ -47,6 +47,40 @@ print("CWD =", os.getcwd())
 print("Looking for progress DB at:", os.path.abspath("user_progress.db"))
 print("Directory content:", os.listdir(os.getcwd()))
 
+
+def get_s3_file_size(s3_uri: str) -> int:
+    """
+    Returns size in bytes of an S3 object.
+    """
+    try:
+        bucket = AWS_BUCKET_NAME
+        key = s3_uri.replace(f"s3://{bucket}/", "")
+
+        s3 = boto3.client(
+            "s3",
+            aws_access_key_id=AWS_ACCESS_KEY,
+            aws_secret_access_key=AWS_SECRET_KEY,
+            region_name=AWS_REGION,
+        )
+
+        response = s3.head_object(Bucket=bucket, Key=key)
+        return response["ContentLength"]  # bytes
+
+    except Exception:
+        return 0
+
+
+def estimate_wav_duration_seconds(file_size_bytes: int) -> float:
+    """
+    Audio-recorder-streamlit produces 16-bit PCM, 32k bytes/sec.
+    """
+    if file_size_bytes <= 0:
+        return 0.0
+
+    BYTES_PER_SECOND = 32000
+    return file_size_bytes / BYTES_PER_SECOND
+
+
 def download_db_from_s3(s3_key, local_path):
     s3 = boto3.client(
         "s3",
@@ -147,6 +181,18 @@ conn.execute("""
         completed INTEGER DEFAULT 0
     )
 """)
+
+# Per-project progress (username + project)
+conn.execute("""
+    CREATE TABLE IF NOT EXISTS project_progress (
+        username TEXT,
+        project INTEGER,
+        step INTEGER,
+        completed INTEGER DEFAULT 0,
+        PRIMARY KEY (username, project)
+    )
+""")
+
 # Migration for older DBs that don't have 'completed' yet
 try:
     conn.execute("ALTER TABLE progress ADD COLUMN completed INTEGER DEFAULT 0")
@@ -207,6 +253,12 @@ def init_db(db_path: str = DB_PATH) -> None:
     except sqlite3.OperationalError:
         pass  # already exists
 
+    # Add project column if missing (default Project 1)
+    try:
+        c.execute("ALTER TABLE texts ADD COLUMN project INTEGER DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+
 
     c.execute(
         """
@@ -216,11 +268,16 @@ def init_db(db_path: str = DB_PATH) -> None:
             language TEXT NOT NULL,
             is_rtl BOOLEAN DEFAULT 1,
             user_id INTEGER,
+            source_file TEXT,
+            project INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users (id)
         )
         """
     )
+
+
+
     # Migration: Check existing columns and migrate if needed
     try:
         c.execute("PRAGMA table_info(texts)")
@@ -308,21 +365,30 @@ def reset_user_mfa(user_id: int, db_path=DB_PATH):
 
 
 def get_all_texts(user_id: Optional[int] = None, db_path: str = DB_PATH) -> list:
+    """
+    Returns rows as:
+      (id, prompts, language, is_rtl, user_id, project)
+    """
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
     if user_id:
-        c.execute("SELECT id, prompts, language, is_rtl, user_id FROM texts WHERE user_id = ?", (user_id,))
+        c.execute("SELECT id, prompts, language, is_rtl, user_id, project FROM texts WHERE user_id = ?", (user_id,))
     else:
-        c.execute("SELECT id, prompts, language, is_rtl, user_id FROM texts")
+        c.execute("SELECT id, prompts, language, is_rtl, user_id, project FROM texts")
     texts = c.fetchall()
     conn.close()
     return texts
 
 
+
 def get_text_by_id(text_id: int, db_path: str = DB_PATH):
+    """
+    Returns:
+      (id, prompts, language, is_rtl, user_id, project)
+    """
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
-    c.execute("SELECT id, prompts, language, is_rtl, user_id FROM texts WHERE id = ?", (text_id,))
+    c.execute("SELECT id, prompts, language, is_rtl, user_id, project FROM texts WHERE id = ?", (text_id,))
     text = c.fetchone()
     conn.close()
     return text
@@ -330,22 +396,28 @@ def get_text_by_id(text_id: int, db_path: str = DB_PATH):
 
 def add_text(text: str, language: str = "ar", is_rtl: bool = True,
              user_id: Optional[int] = None, source_file: Optional[str] = None,
-             db_path: str = DB_PATH) -> int:
+             project: int = 1, db_path: str = DB_PATH) -> int:
+    """
+    Insert a script into texts with a project number (default = 1).
+    """
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
 
     c.execute("""
-        INSERT INTO texts (prompts, language, is_rtl, user_id, source_file)
-        VALUES (?, ?, ?, ?, ?)
-    """, (text, language, is_rtl, user_id, source_file))
+        INSERT INTO texts (prompts, language, is_rtl, user_id, source_file, project)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (text, language, is_rtl, user_id, source_file, project))
 
     conn.commit()
     text_id = c.lastrowid
     conn.close()
 
+    # Persist DB to S3
     upload_db_to_s3(DB_PATH, f"{S3_DB_PREFIX}/texts.db")
 
     return text_id
+
+
 
 
 def create_user(username: str, password: str, db_path: str = DB_PATH) -> Optional[int]:
@@ -467,7 +539,7 @@ def update_mfa_timestamp(user_id, db_path=DB_PATH):
     conn.close()
 
 
-def needs_mfa(user_id, hours=12, db_path=DB_PATH):
+def needs_mfa(user_id, hours=24, db_path=DB_PATH):
     """Return True if MFA is required again."""
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
@@ -522,18 +594,73 @@ def save_progress(user):
     conn = get_db_connection()
     step = st.session_state.get("current_text_index", 0)
     audio = st.session_state.get("audio_bytes")
-    completed = 1 if st.session_state.get("user_completed", False) else 0
+    completed_flag = 1 if st.session_state.get("user_completed", False) else 0
 
     conn.execute(
         "REPLACE INTO progress (username, step, audio, completed) VALUES (?, ?, ?, ?)",
-        (user, step, audio, completed)
+        (user, step, audio, completed_flag)
     )
     conn.commit()
     conn.close()
 
-    # Upload DB to S3
+    # Also sync per-project progress if we know the current project
+    project = st.session_state.get("current_project")
+    if project is not None:
+        save_project_progress(user, project, step, bool(completed_flag))
+
+    # Upload DB to S3 (save_progress was doing this already; we keep it)
     upload_db_to_s3(PROGRESS_DB_PATH, f"{S3_DB_PREFIX}/user_progress_v2.db")
 
+
+
+def get_project_progress(username: str, project: int) -> Tuple[int, bool]:
+    """
+    Returns (step, completed) for a given username + project.
+    If no row exists yet, returns (0, False).
+    """
+    conn = get_db_connection()
+    row = conn.execute(
+        "SELECT step, completed FROM project_progress WHERE username=? AND project=?",
+        (username, project)
+    ).fetchone()
+    conn.close()
+
+    if row:
+        step, completed = row
+        return step, bool(completed)
+    return 0, False
+
+
+def save_project_progress(username: str, project: int, step: int, completed: bool) -> None:
+    """
+    Upserts per-project progress, and syncs to S3.
+    """
+    conn = get_db_connection()
+    conn.execute(
+        """
+        REPLACE INTO project_progress (username, project, step, completed)
+        VALUES (?, ?, ?, ?)
+        """,
+        (username, project, step, 1 if completed else 0)
+    )
+    conn.commit()
+    conn.close()
+
+    # Persist progress DB to S3
+    upload_db_to_s3(PROGRESS_DB_PATH, f"{S3_DB_PREFIX}/user_progress_v2.db")
+
+
+def project_is_completed(username: str, project: int) -> bool:
+    """
+    True if this project is fully completed for this user.
+    """
+    conn = get_db_connection()
+    row = conn.execute(
+        "SELECT completed FROM project_progress WHERE username=? AND project=?",
+        (username, project)
+    ).fetchone()
+    conn.close()
+    return bool(row and row[0] == 1)
 
 
     
@@ -1091,6 +1218,16 @@ def run_streamlit_app() -> None:
                         # NEW: Track the original filename
                         source_file = uploaded_file.name
 
+                        project_num = st.number_input(
+                            "Project Number",
+                            min_value=1,
+                            max_value=999,
+                            value=1,
+                            step=1,
+                            help="Which project these scripts belong to (1, 2, 3, ...)."
+                        )
+                     
+
                         if st.button("Import from File", key="admin_import_btn"):
                             count = 0
                             for line in lines:
@@ -1099,12 +1236,14 @@ def run_streamlit_app() -> None:
                                     language,
                                     is_rtl,
                                     st.session_state["user_id"],
-                                    source_file=source_file   # NEW
+                                    source_file=source_file,
+                                    project=project_num
                                 )
                                 count += 1
 
-                            st.success(f"Imported {count} texts from '{source_file}'")
+                            st.success(f"Imported {count} texts from '{source_file}' into Project {project_num}")
                             st.rerun()
+
 
                     except Exception as e:
                         st.error(f"Error reading file: {e}")
@@ -1188,10 +1327,10 @@ def run_streamlit_app() -> None:
         """, unsafe_allow_html=True)
 
 
-    # ---- FIRST-TIME LANGUAGE SELECTION (MAIN AREA) ----
+    # ---- FIRST-TIME LANGUAGE + PROJECT SELECTION (MAIN AREA) ----
     if st.session_state.get("authenticated", False) and not st.session_state.get("is_admin", False):
 
-        # Always refresh assigned language
+        # Always fetch latest language from DB to allow live admin updates  
         latest_lang = get_user_language(st.session_state["user_id"])
         st.session_state["chosen_language"] = latest_lang
 
@@ -1201,17 +1340,47 @@ def run_streamlit_app() -> None:
             st.info("Please contact your admin to be assigned a language before you can begin recording.")
             return
 
-        # Load texts ONLY if text_ids is empty
-        if not st.session_state.get("text_ids"):
-            texts = get_all_texts(db_path=DB_PATH)
-            lang_texts = [t for t in texts if t[2] == latest_lang]
-            st.session_state["text_ids"] = [t[0] for t in lang_texts]
+        # Fetch all texts for this language
+        texts = get_all_texts(db_path=DB_PATH)
+        # t structure: (id, prompts, language, is_rtl, user_id, project)
+        lang_texts = [t for t in texts if t[2] == latest_lang]
 
-            # index safety
-            st.session_state["current_text_index"] = min(
-                st.session_state.get("current_text_index", 0),
-                max(len(st.session_state["text_ids"]) - 1, 0)
-            )
+        if not lang_texts:
+            st.warning("No scripts have been assigned yet for your language.")
+            return
+
+        # Determine available projects for this language
+        available_projects = sorted({t[5] for t in lang_texts})  # index 5 = project
+
+        # Choose project (store in session)
+        default_project = st.session_state.get("current_project") or min(available_projects)
+        selected_project = st.selectbox(
+            "Select Project",
+            options=available_projects,
+            index=available_projects.index(default_project) if default_project in available_projects else 0
+        )
+        st.session_state["current_project"] = selected_project
+
+        # Enforce linear completion: must finish project N before N+1
+        # If user picks project > 1 but hasn't completed previous project, block
+        if selected_project > 1 and not project_is_completed(st.session_state["username"], selected_project - 1):
+            st.warning(f"You must complete Project {selected_project - 1} before accessing Project {selected_project}.")
+            return
+
+        # Filter texts for this project
+        project_texts = [t for t in lang_texts if t[5] == selected_project]
+        if not project_texts:
+            st.warning(f"No scripts found for Project {selected_project}.")
+            return
+
+        # Make sure text_ids reflect the current project
+        st.session_state["text_ids"] = [t[0] for t in project_texts]
+
+        # Load per-project progress (or start at 0 if none)
+        saved_step, project_completed = get_project_progress(st.session_state["username"], selected_project)
+        st.session_state["current_text_index"] = min(saved_step, max(len(st.session_state["text_ids"]) - 1, 0))
+        st.session_state["user_completed"] = project_completed
+
 
 
 
@@ -1234,7 +1403,7 @@ def run_streamlit_app() -> None:
         text_data = get_text_by_id(current_text_id)
 
         if text_data:
-            text_id, text, language, is_rtl, user_id = text_data
+            text_id, text, language, is_rtl, user_id, project = text_data
             st.markdown(
                 "<p style='color: white; font-size: 16px; margin-bottom: 10px;'>Please record yourself reading the following scripts out loud:</p>",
                 unsafe_allow_html=True
@@ -1389,14 +1558,20 @@ def run_streamlit_app() -> None:
                     st.write(f"**Text ID:** {text_id}")
                     st.write(f"**Text:** {text_content[:100]}{'...' if len(text_content) > 100 else ''}")
                     if os.path.exists(audio_path):
-                        if audio_path.startswith("s3://"):
-                            try:
-                                url = generate_presigned_url(audio_path)
-                                st.audio(url, format="audio/wav")
-                            except Exception as e:
-                                st.error(f"Could not load audio: {e}")
-                        else:
-                            st.audio(audio_path, format="audio/wav")
+                        if audio_path:
+                            if audio_path.startswith("s3://"):
+                                # S3 object – generate a presigned URL
+                                try:
+                                    url = generate_presigned_url(audio_path)
+                                    st.audio(url, format="audio/wav")
+                                except Exception as e:
+                                    st.error(f"Could not load audio from S3: {e}")
+                            else:
+                                # Local file – check existence
+                                if os.path.exists(audio_path):
+                                    st.audio(audio_path, format="audio/wav")
+                                else:
+                                    st.warning(f"Audio file not found: {audio_path}")
 
                     st.write(f"**Status:** {status}")
                     st.write(f"**Created:** {created_at}")
@@ -1518,18 +1693,52 @@ def run_streamlit_app() -> None:
                 # 3. Add to its group
                 grouped.setdefault(username_key, []).append(rec)
 
+            # -----------------------------------------
+            # TOTAL HOURS FOR ALL USERS (Admin Summary)
+            # -----------------------------------------
+            global_total_seconds = 0
+
+            for rec in all_recordings:
+                rec_id, audio_path, job_id, status, created_at, text_content, text_id, username_from_db = rec
+                if audio_path and audio_path.startswith("s3://"):
+                    size = get_s3_file_size(audio_path)
+                    global_total_seconds += estimate_wav_duration_seconds(size)
+
+            global_total_hours = global_total_seconds / 3600.0
+
+            st.success(
+                f"📊 **Total Hours Recorded (All Users): {global_total_hours:.2f} hours**"
+            )
+
 
             # Render group dropdowns
             for username, rec_list in grouped.items():
-                with st.expander(f"User: {username} — {len(rec_list)} recordings"):
+
+                # --- Compute total audio duration ---
+                total_seconds = 0
+
+                for rec in rec_list:
+                    rec_id, audio_path, job_id, status, created_at, text_content, text_id, username_from_db = rec
+
+                    if audio_path and audio_path.startswith("s3://"):
+                        size = get_s3_file_size(audio_path)
+                        total_seconds += estimate_wav_duration_seconds(size)
+
+                total_hours = total_seconds / 3600.0
+
+                # --- EXPANDER WITH HOURS ---
+                with st.expander(f"User: {username} — {len(rec_list)} recordings — {total_hours:.2f} hours recorded"):
+
                     # Inside each dropdown, list that user's recordings
                     for rec in rec_list:
                         rec_id, audio_path, job_id, status, created_at, text_content, text_id, username = rec
+
                         with st.expander(f"Recording {rec_id} — {created_at} | Status: {status}"):
+
                             st.write(f"**Text ID:** {text_id}")
                             st.write(f"**Text:** {text_content[:100]}{'...' if len(text_content) > 100 else ''}")
+
                             if audio_path:
-                                # S3 URL support (Streamlit handles it natively)
                                 if audio_path.startswith("s3://"):
                                     try:
                                         url = generate_presigned_url(audio_path)
@@ -1538,11 +1747,11 @@ def run_streamlit_app() -> None:
                                         st.error(f"Could not load audio: {e}")
                                 else:
                                     st.audio(audio_path, format="audio/wav")
+
                             st.write(f"**Status:** {status}")
                             st.write(f"**Created:** {created_at}")
 
-
-# --- End of Section 3 ---
+            # --- End of Section 3 ---
 
 
 
