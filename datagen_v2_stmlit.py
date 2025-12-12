@@ -1745,26 +1745,20 @@ def run_streamlit_app() -> None:
             grouped = {}
 
             for rec in all_recordings:
-                if len(rec) != 9:
-                    continue  # skip malformed rows
+                rec_id, audio_path, job_id, status, created_at, text_content, text_id, username_from_db, duration_seconds = rec
 
-                (
-                    rec_id,
-                    audio_path,
-                    job_id,
-                    status,
-                    created_at,
-                    text_content,
-                    text_id,
-                    username_from_db,
-                    duration_seconds,
-                ) = rec
+                # ✅ ALWAYS derive speaker from S3 path
+                username_key = "Unknown"
 
-                # use username stored in DB (from JOIN)
-                username_key = username_from_db or "Unknown"
+                if audio_path and audio_path.startswith("s3://"):
+                    clean = audio_path.replace(f"s3://{AWS_BUCKET_NAME}/", "")
+                    parts = clean.split("/")
+                    # Expected: language/username/audio/file.wav
+                    if len(parts) >= 3 and parts[1]:
+                        username_key = parts[1]
 
-                # 3. Add to its group
                 grouped.setdefault(username_key, []).append(rec)
+
 
             # -----------------------------------------
             # TOTAL HOURS FOR ALL USERS (Admin Summary)
