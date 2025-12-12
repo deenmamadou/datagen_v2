@@ -1759,7 +1759,9 @@ def run_streamlit_app() -> None:
                 rec_id, audio_path, job_id, status, created_at, text_content, text_id, username_from_db, 
                 duration_seconds = rec
                 if duration_seconds is not None:
-                    global_total_seconds += float(duration_seconds)
+                    if duration_seconds:
+                        global_total_seconds += float(duration_seconds)
+
 
 
             global_total_hours = global_total_seconds / 3600.0
@@ -1777,7 +1779,7 @@ def run_streamlit_app() -> None:
                 for rec in rec_list:
                     rec_id, audio_path, job_id, status, created_at, text_content, text_id, username, duration_seconds = rec
                     if duration_seconds is not None:
-                        total_seconds += float(duration_seconds)
+                        total_seconds += float(duration_seconds or 0)
 
 
                 total_hours = total_seconds / 3600.0
@@ -1787,7 +1789,7 @@ def run_streamlit_app() -> None:
 
                     # Inside each dropdown, list that user's recordings
                     for rec in rec_list:
-                        rec_id, audio_path, job_id, status, created_at, text_content, text_id, username, duration_seconds = rec
+                        rec_id, audio_path, job_id, status, created_at, text_content, text_id, username_from_db, duration_seconds = rec
 
                         with st.expander(f"Recording {rec_id} — {created_at} | Status: {status}"):
 
