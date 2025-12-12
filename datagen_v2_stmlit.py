@@ -837,11 +837,12 @@ def get_all_recordings_by_user(user_id: Optional[int] = None, db_path: str = DB_
                 u.username,
                 r.duration_seconds
             FROM recordings r
-            LEFT JOIN users u ON r.user_id = u.id
-            LEFT JOIN texts t ON r.text_id = t.id
+            JOIN texts t ON r.text_id = t.id
+            LEFT JOIN users u ON t.user_id = u.id
+            WHERE r.audio_file_path LIKE ?
             ORDER BY r.created_at DESC
-
         """, (pattern,))
+
 
 
 
