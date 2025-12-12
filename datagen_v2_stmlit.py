@@ -1602,7 +1602,7 @@ def run_streamlit_app() -> None:
             for local_num, rec in indexed_records:
                 rec_id, audio_path, job_id, status, created_at, text_content, text_id, username, duration_seconds = rec
 
-                with st.expander(f"Recording {local_num} - {created_at} | Status: {status}"):
+                with st.expander(f"Recording {local_num} - {created_at} "):
                     st.write(f"**Text ID:** {text_id}")
                     st.write(f"**Text:** {text_content[:100]}{'...' if len(text_content) > 100 else ''}")
                     if audio_path:
@@ -1620,8 +1620,6 @@ def run_streamlit_app() -> None:
                             else:
                                 st.warning(f"Audio file not found: {audio_path}")
 
-                st.write(f"**Status:** {status}")
-                st.write(f"**Created:** {created_at}")
         else:
             st.info("You haven't made any recordings yet.")
 
@@ -1819,7 +1817,7 @@ def run_streamlit_app() -> None:
                     for rec in rec_list:
                         rec_id, audio_path, job_id, status, created_at, text_content, text_id, username_from_db, duration_seconds = rec
 
-                        with st.expander(f"Recording {rec_id} — {created_at} | Status: {status}"):
+                        with st.expander(f"Recording {rec_id} — {created_at}"):
 
                             st.write(f"**Text ID:** {text_id}")
                             st.write(f"**Text:** {text_content[:100]}{'...' if len(text_content) > 100 else ''}")
