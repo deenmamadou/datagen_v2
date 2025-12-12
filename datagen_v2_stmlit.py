@@ -1733,7 +1733,7 @@ def run_streamlit_app() -> None:
             grouped = {}
 
             for rec in all_recordings:
-                rec_id, audio_path, job_id, status, created_at, text_content, text_id, username_from_db = rec
+                rec_id, audio_path, job_id, status, created_at, text_content, text_id, username_from_db, duration_seconds = rec
 
                 # 1. Try extracting username from S3 path
                 extracted_username = None
