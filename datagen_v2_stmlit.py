@@ -1832,8 +1832,6 @@ def run_streamlit_app() -> None:
                                 else:
                                     st.audio(audio_path, format="audio/wav")
 
-                        st.write(f"**Status:** {status}")
-                        st.write(f"**Created:** {created_at}")
 
             # --- End of Section 3 ---
 
