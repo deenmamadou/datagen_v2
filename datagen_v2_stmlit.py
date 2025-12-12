@@ -224,6 +224,13 @@ def init_db(db_path: str = DB_PATH) -> None:
     except sqlite3.OperationalError:
         pass  # column already exists
 
+        # ✅ Add user_id column to recordings (who actually recorded)
+    try:
+        c.execute("ALTER TABLE recordings ADD COLUMN user_id INTEGER")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+
+
     try:
         c.execute("ALTER TABLE recordings ADD COLUMN duration_seconds REAL")
         conn.commit()
@@ -748,7 +755,9 @@ def save_recording(
             INSERT INTO recordings (text_id, audio_file_path, hoppepper_job_id, status, duration_seconds)
             VALUES (?, ?, NULL, ?, ?)
             """,
-            (text_id, audio_file_path, status, duration_seconds),
+                user_id = st.session_state["user_id"]
+
+                (text_id, audio_file_path, status, duration_seconds, user_id)
         )
     except sqlite3.OperationalError:
         # Column doesn't exist in some older DBs – fallback to original insert
@@ -794,7 +803,7 @@ def get_all_recordings_by_user(user_id: Optional[int] = None, db_path: str = DB_
     if user_id is None:
         # Admin sees ALL recordings
         c.execute("""
-            SELECT 
+            SELECT
                 r.id,
                 r.audio_file_path,
                 r.hoppepper_job_id,
@@ -805,8 +814,8 @@ def get_all_recordings_by_user(user_id: Optional[int] = None, db_path: str = DB_
                 u.username,
                 r.duration_seconds
             FROM recordings r
+            LEFT JOIN users u ON r.user_id = u.id   -- ✅ FIX
             LEFT JOIN texts t ON r.text_id = t.id
-            LEFT JOIN users u ON t.user_id = u.id
             ORDER BY r.created_at DESC
         """)
 
@@ -817,7 +826,7 @@ def get_all_recordings_by_user(user_id: Optional[int] = None, db_path: str = DB_
         pattern = f"%/{username}/audio/%"
 
         c.execute("""
-            SELECT 
+            SELECT
                 r.id,
                 r.audio_file_path,
                 r.hoppepper_job_id,
@@ -828,10 +837,10 @@ def get_all_recordings_by_user(user_id: Optional[int] = None, db_path: str = DB_
                 u.username,
                 r.duration_seconds
             FROM recordings r
-            JOIN texts t ON r.text_id = t.id
-            LEFT JOIN users u ON t.user_id = u.id
-            WHERE r.audio_file_path LIKE ?
+            LEFT JOIN users u ON r.user_id = u.id
+            LEFT JOIN texts t ON r.text_id = t.id
             ORDER BY r.created_at DESC
+
         """, (pattern,))
 
 
@@ -1709,7 +1718,7 @@ def run_streamlit_app() -> None:
         c = conn.cursor()
 
         c.execute("""
-            SELECT 
+            SELECT
                 r.id,
                 r.audio_file_path,
                 r.hoppepper_job_id,
@@ -1720,9 +1729,10 @@ def run_streamlit_app() -> None:
                 u.username,
                 r.duration_seconds
             FROM recordings r
+            LEFT JOIN users u ON r.user_id = u.id
             LEFT JOIN texts t ON r.text_id = t.id
-            LEFT JOIN users u ON t.user_id = u.id
             ORDER BY r.created_at DESC
+
         """)
 
 
@@ -1751,17 +1761,8 @@ def run_streamlit_app() -> None:
                     duration_seconds,
                 ) = rec
 
-                # 1. Try extracting username from S3 path
-                extracted_username = None
-                if audio_path and audio_path.startswith("s3://"):
-                    clean = audio_path.replace(f"s3://{AWS_BUCKET_NAME}/", "")
-                    # Expect:   lang/username/audio/file.wav
-                    parts = clean.split("/")
-                    if len(parts) >= 3:
-                        extracted_username = parts[1]
-
-                # 2. Fallback: use username stored in DB (from JOIN)
-                username_key = extracted_username or username_from_db or "Unknown"
+                # use username stored in DB (from JOIN)
+                username_key = username_from_db or "Unknown"
 
                 # 3. Add to its group
                 grouped.setdefault(username_key, []).append(rec)
