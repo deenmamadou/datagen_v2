@@ -23,6 +23,8 @@ from botocore.exceptions import BotoCoreError, ClientError
 import qrcode
 from io import BytesIO
 import re
+import time
+
 
 
 # --- Persistent DB via S3 ---
@@ -101,6 +103,7 @@ def upload_bytes_to_s3(bytes_data: bytes, s3_key: str) -> str:
 
 
 import threading
+
 
 def upload_async(audio_bytes, audio_key, text_key, text):
     """
@@ -237,6 +240,15 @@ def init_db(db_path: str = DB_PATH) -> None:
     except sqlite3.OperationalError:
         pass  # column already exists
     
+    try:
+        c.execute("ALTER TABLE users ADD COLUMN total_active_seconds REAL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        c.execute("ALTER TABLE users ADD COLUMN last_active_at TIMESTAMP")
+    except sqlite3.OperationalError:
+        pass
 
 
     c.execute(
@@ -880,10 +892,37 @@ def get_username_from_user_id(user_id, db_path=DB_PATH):
 # ---------------------------
 # Streamlit UI 
 # ---------------------------
+# ---------------------------
+# Session Time Persistence
+# ---------------------------
+
+def persist_session_time():
+    start = st.session_state.get("session_start_ts")
+    user_id = st.session_state.get("user_id")
+
+    if not start or not user_id:
+        return
+
+    elapsed = time.time() - start
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        """
+        UPDATE users
+        SET total_time_seconds = COALESCE(total_time_seconds, 0) + ?
+        WHERE id = ?
+        """,
+        (elapsed, user_id)
+    )
+    conn.commit()
+    conn.close()
+
+    # Persist to S3 so it survives restarts
+    upload_db_to_s3(DB_PATH, f"{S3_DB_PREFIX}/texts.db")
 
 def run_streamlit_app() -> None:
     st.set_page_config(page_title="datagen_v2", layout="wide")
-
     st.session_state.setdefault("final_extra_recording_allowed", True)
     st.session_state.setdefault("final_extra_recording_done", False)
 
@@ -906,6 +945,13 @@ def run_streamlit_app() -> None:
         "pending_mfa_username": None,
     }.items():
         st.session_state.setdefault(key, val)
+
+    if (
+        st.session_state.get("authenticated")
+        and "session_start_ts" not in st.session_state
+    ):
+        st.session_state["session_start_ts"] = time.time()
+
 
 
     # Authentication UI
@@ -942,6 +988,7 @@ def run_streamlit_app() -> None:
                             st.session_state["user_id"] = user_id
                             st.session_state["username"] = username
                             st.session_state["authenticated"] = True
+                            st.session_state["session_start_ts"] = time.time()
                             st.session_state["is_admin"] = True
                             st.success("Signed in — MFA not required this time.")
                             st.rerun()
@@ -989,6 +1036,7 @@ def run_streamlit_app() -> None:
                         st.session_state["user_id"] = user_id
                         st.session_state["username"] = username
                         st.session_state["authenticated"] = True
+                        st.session_state["session_start_ts"] = time.time()
                         st.session_state["is_admin"] = False
 
 
@@ -1037,6 +1085,7 @@ def run_streamlit_app() -> None:
                             st.session_state["user_id"] = user_id
                             st.session_state["username"] = new_username
                             st.session_state["authenticated"] = True
+                            st.session_state["session_start_ts"] = time.time()
                             st.session_state["is_admin"] = False
 
                             # 💥 CRITICAL: Mark new user as having no chosen language yet
@@ -1113,6 +1162,7 @@ def run_streamlit_app() -> None:
                 st.session_state["user_id"] = user_id
                 st.session_state["username"] = st.session_state["pending_mfa_username"]
                 st.session_state["authenticated"] = True
+                st.session_state["session_start_ts"] = time.time()
                 st.session_state["is_admin"] = True
 
                 # Clear MFA temp state
@@ -1165,6 +1215,7 @@ def run_streamlit_app() -> None:
 
                 st.session_state["username"] = st.session_state["pending_mfa_username"]
                 st.session_state["authenticated"] = True
+                st.session_state["session_start_ts"] = time.time()
                 st.session_state["is_admin"] = True
 
 
@@ -1234,7 +1285,7 @@ def run_streamlit_app() -> None:
             st.write(f"**Signed in as:** {st.session_state['username']}{admin_badge}")
 
             if st.button("Sign Out", key="sidebar_signout_btn"):
-
+                persist_session_time()
                 # Save progress BEFORE logout
                 if st.session_state.get("username"):
                     save_progress(st.session_state["username"])
