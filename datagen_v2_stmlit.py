@@ -245,6 +245,13 @@ def init_db(db_path: str = DB_PATH) -> None:
     except sqlite3.OperationalError:
         pass
 
+        # ✅ Add total_time_seconds column if missing
+    try:
+        c.execute("ALTER TABLE users ADD COLUMN total_time_seconds INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+
+
     try:
         c.execute("ALTER TABLE users ADD COLUMN last_active_at TIMESTAMP")
     except sqlite3.OperationalError:
@@ -897,34 +904,49 @@ def get_username_from_user_id(user_id, db_path=DB_PATH):
 # ---------------------------
 
 def persist_session_time():
-    start = st.session_state.get("session_start_ts")
-    user_id = st.session_state.get("user_id")
+    import time
 
-    if not start or not user_id:
+    if "session_start_ts" not in st.session_state:
         return
 
-    elapsed = time.time() - start
+    user_id = st.session_state.get("user_id")
+    if not user_id:
+        return
+
+    now = time.time()
+    last_activity = st.session_state.get("last_activity_ts", now)
+
+    IDLE_TIMEOUT_SECONDS = 300  # 5 minutes
+    effective_end = min(now, last_activity + IDLE_TIMEOUT_SECONDS)
+
+    elapsed = int(effective_end - st.session_state["session_start_ts"])
+    if elapsed <= 0:
+        return
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute(
-        """
+
+    c.execute("""
         UPDATE users
         SET total_time_seconds = COALESCE(total_time_seconds, 0) + ?
         WHERE id = ?
-        """,
-        (elapsed, user_id)
-    )
+    """, (elapsed, user_id))
+
     conn.commit()
     conn.close()
 
-    # Persist to S3 so it survives restarts
-    upload_db_to_s3(DB_PATH, f"{S3_DB_PREFIX}/texts.db")
+    # reset session timer so time is not double-counted
+    st.session_state["session_start_ts"] = now
+
 
 def run_streamlit_app() -> None:
     st.set_page_config(page_title="datagen_v2", layout="wide")
     st.session_state.setdefault("final_extra_recording_allowed", True)
     st.session_state.setdefault("final_extra_recording_done", False)
+    if st.session_state.get("authenticated"):
+        st.session_state.setdefault("session_start_ts", time.time())
+        st.session_state.setdefault("last_activity_ts", time.time())
+
 
 
     # Ensure DB is ready
@@ -1285,6 +1307,7 @@ def run_streamlit_app() -> None:
             st.write(f"**Signed in as:** {st.session_state['username']}{admin_badge}")
 
             if st.button("Sign Out", key="sidebar_signout_btn"):
+
                 persist_session_time()
                 # Save progress BEFORE logout
                 if st.session_state.get("username"):
