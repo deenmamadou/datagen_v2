@@ -1832,7 +1832,12 @@ def run_streamlit_app() -> None:
                         with st.expander(f"Recording {rec_id} — {created_at}"):
 
                             st.write(f"**Text ID:** {text_id}")
-                            st.write(f"**Text:** {text_content[:100]}{'...' if len(text_content) > 100 else ''}")
+                            if text_content:
+                                st.write(
+                                    f"**Text:** {text_content[:100]}{'...' if len(text_content) > 100 else ''}"
+                                )
+                            else:
+                                st.write("**Text:** *(original script no longer available)*")
 
                             if audio_path:
                                 if audio_path.startswith("s3://"):
