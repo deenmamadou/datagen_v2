@@ -1503,9 +1503,9 @@ def run_streamlit_app() -> None:
 
         # Enforce linear completion: must finish project N before N+1
         # If user picks project > 1 but hasn't completed previous project, block
-        if selected_project > 1 and not project_is_completed(st.session_state["username"], selected_project - 1):
-            st.warning(f"You must complete Project {selected_project - 1} before accessing Project {selected_project}.")
-            return
+#        if selected_project > 1 and not project_is_completed(st.session_state["username"], selected_project - 1):
+#            st.warning(f"You must complete Project {selected_project - 1} before accessing Project {selected_project}.")
+#            return
 
         # Filter texts for this project
         project_texts = [t for t in lang_texts if t[5] == selected_project]
