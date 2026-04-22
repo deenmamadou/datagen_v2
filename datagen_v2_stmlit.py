@@ -2111,10 +2111,8 @@ def run_streamlit_app() -> None:
         st.markdown("---")
         st.subheader("All Recordings")
 
-        # Fully explicit JOIN so admin always sees all recordings
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-
         c.execute("""
             SELECT
                 r.id,
@@ -2123,115 +2121,99 @@ def run_streamlit_app() -> None:
                 r.status,
                 r.created_at,
                 t.prompts,
-                t.id AS text_id,
-                u.username,
-                r.duration_seconds
+                t.id        AS text_id,
+                u.username  AS db_username,
+                r.duration_seconds,
+                COALESCE(t.project,  -1)        AS project_id,
+                COALESCE(t.language, 'unknown') AS locale
             FROM recordings r
             LEFT JOIN users u ON r.user_id = u.id
             LEFT JOIN texts t ON r.text_id = t.id
             ORDER BY r.created_at DESC
-
         """)
-
-
         all_recordings = c.fetchall()
         conn.close()
 
         if not all_recordings:
             st.info("No recordings found in the system.")
         else:
-            # --- Clean, Robust Grouping for Admin View ---
-            grouped = {}
+            # Global total
+            _global_secs = sum(float(r[8] or 0) for r in all_recordings)
+            st.success(f"📊 **Total recorded (all users): {_global_secs / 3600:.2f} hours**")
 
+            # ── Build 3-level tree: project_id → locale → username → [recs] ──
+            _tree: dict = {}
             for rec in all_recordings:
-                rec_id, audio_path, job_id, status, created_at, text_content, text_id, username_from_db, duration_seconds = rec
+                _, audio_path, _, _, _, _, _, db_uname, _, proj_id, locale = rec
 
-                # ✅ ALWAYS derive speaker from S3 path
-                username_key = "Unknown"
+                # Prefer DB username; fall back to S3 path segment
+                uname = db_uname or ""
+                if not uname and audio_path and audio_path.startswith("s3://"):
+                    _parts = audio_path.replace(f"s3://{AWS_BUCKET_NAME}/", "").split("/")
+                    if len(_parts) >= 2 and _parts[1]:
+                        uname = _parts[1]
+                uname = uname or "Unknown"
 
-                if audio_path and audio_path.startswith("s3://"):
-                    clean = audio_path.replace(f"s3://{AWS_BUCKET_NAME}/", "")
-                    parts = clean.split("/")
-                    # Expected: language/username/audio/file.wav
-                    if len(parts) >= 3 and parts[1]:
-                        username_key = parts[1]
+                _tree.setdefault(proj_id, {}).setdefault(locale, {}).setdefault(uname, []).append(rec)
 
-                grouped.setdefault(username_key, []).append(rec)
+            # Render projects in insertion order; unknown/deleted project last
+            _ordered_pids = [p for p in all_projects if p in _tree]
+            if -1 in _tree:
+                _ordered_pids.append(-1)
+            # Any project not in all_projects but present in tree (edge case)
+            for _pid in _tree:
+                if _pid not in _ordered_pids:
+                    _ordered_pids.append(_pid)
 
+            for _pid in _ordered_pids:
+                _locale_map = _tree[_pid]
+                _plabel = (
+                    _proj_name.get(_pid, f"Project {_pid}")
+                    if _pid != -1 else "Unknown / Deleted Project"
+                )
+                _proj_recs = [r for lm in _locale_map.values() for ur in lm.values() for r in ur]
+                _proj_secs = sum(float(r[8] or 0) for r in _proj_recs)
 
-            # -----------------------------------------
-            # TOTAL HOURS FOR ALL USERS (Admin Summary)
-            # -----------------------------------------
-            global_total_seconds = 0.0
+                with st.expander(
+                    f"📁 {_plabel} — {len(_proj_recs)} recordings — {_proj_secs/3600:.2f} hrs",
+                    expanded=False,
+                ):
+                    for _locale, _user_map in _locale_map.items():
+                        _loc_recs = [r for ur in _user_map.values() for r in ur]
+                        _loc_secs = sum(float(r[8] or 0) for r in _loc_recs)
 
-            for rec in all_recordings:
-                (
-                    rec_id,
-                    audio_path,
-                    job_id,
-                    status,
-                    created_at,
-                    text_content,
-                    text_id,
-                    username_from_db,
-                    duration_seconds,
-                ) = rec
+                        with st.expander(
+                            f"📍 {_locale} — {len(_loc_recs)} recordings — {_loc_secs/3600:.2f} hrs",
+                            expanded=False,
+                        ):
+                            for _uname, _rec_list in _user_map.items():
+                                _u_secs = sum(float(r[8] or 0) for r in _rec_list)
 
-                try:
-                    global_total_seconds += float(duration_seconds or 0)
-                except (TypeError, ValueError):
-                    pass
+                                with st.expander(
+                                    f"👤 {_uname} — {len(_rec_list)} recordings — {_u_secs/3600:.2f} hrs",
+                                    expanded=False,
+                                ):
+                                    for rec in _rec_list:
+                                        (rec_id, audio_path, _, _, created_at,
+                                         text_content, text_id, _, dur_s, _, _) = rec
+                                        _dur_str = f"{float(dur_s or 0):.1f}s"
 
-
-            global_total_hours = global_total_seconds / 3600.0
-
-            st.success(
-                f"📊 **Total Hours Recorded (All Users): {global_total_hours:.2f} hours**"
-            )
-
-
-            # Render group dropdowns
-            for username, rec_list in grouped.items():
-
-                total_seconds = 0.0
-
-                for rec in rec_list:
-                    rec_id, audio_path, job_id, status, created_at, text_content, text_id, username, duration_seconds = rec
-                    if duration_seconds is not None:
-                        total_seconds += float(duration_seconds or 0)
-
-
-                total_hours = total_seconds / 3600.0
-
-                # --- EXPANDER WITH HOURS ---
-                with st.expander(f"User: {username} — {len(rec_list)} recordings — {total_hours:.2f} hours recorded"):
-
-                    # Inside each dropdown, list that user's recordings
-                    for rec in rec_list:
-                        rec_id, audio_path, job_id, status, created_at, text_content, text_id, username_from_db, duration_seconds = rec
-
-                        with st.expander(f"Recording {rec_id} — {created_at}"):
-
-                            st.write(f"**Text ID:** {text_id}")
-                            if text_content:
-                                st.write(
-                                    f"**Text:** {text_content[:100]}{'...' if len(text_content) > 100 else ''}"
-                                )
-                            else:
-                                st.write("**Text:** *(original script no longer available)*")
-
-                            if audio_path:
-                                if audio_path.startswith("s3://"):
-                                    try:
-                                        url = generate_presigned_url(audio_path)
-                                        st.audio(url, format="audio/wav")
-                                    except Exception as e:
-                                        st.error(f"Could not load audio: {e}")
-                                else:
-                                    st.audio(audio_path, format="audio/wav")
-
-
-            # --- End of Section 3 ---
+                                        with st.expander(
+                                            f"🎙 #{rec_id} — {created_at} — {_dur_str}",
+                                            expanded=False,
+                                        ):
+                                            if text_content:
+                                                st.write(f"**Text:** {text_content[:120]}{'…' if len(text_content) > 120 else ''}")
+                                            else:
+                                                st.write("**Text:** *(script no longer available)*")
+                                            if audio_path:
+                                                if audio_path.startswith("s3://"):
+                                                    try:
+                                                        st.audio(generate_presigned_url(audio_path), format="audio/wav")
+                                                    except Exception as _e:
+                                                        st.error(f"Could not load audio: {_e}")
+                                                else:
+                                                    st.audio(audio_path, format="audio/wav")
 
 
 
