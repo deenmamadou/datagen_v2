@@ -393,6 +393,15 @@ def init_db(db_path: str = DB_PATH) -> None:
         )
         """
     )
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS projects (
+            id   INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -479,13 +488,72 @@ def remove_user_from_project(user_id: int, project: int, db_path=DB_PATH):
 
 
 def get_all_distinct_projects(db_path=DB_PATH) -> list:
-    """Returns all project numbers in upload/insertion order."""
+    """Returns all project IDs in upload/insertion order."""
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
     c.execute("SELECT project FROM texts GROUP BY project ORDER BY MIN(id) ASC")
     rows = c.fetchall()
     conn.close()
     return [r[0] for r in rows]
+
+
+def get_all_projects_with_names(db_path=DB_PATH) -> list:
+    """
+    Returns [(id, name), ...] for every project that has texts, in insertion order.
+    Projects without a name entry fall back to 'Project N'.
+    Also includes named projects that have no texts yet.
+    """
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("SELECT project FROM texts GROUP BY project ORDER BY MIN(id) ASC")
+    text_ids = [r[0] for r in c.fetchall()]
+    c.execute("SELECT id, name FROM projects ORDER BY created_at ASC")
+    named = {r[0]: r[1] for r in c.fetchall()}
+    conn.close()
+    # All project IDs: text-backed ones in insertion order, then named-only ones
+    seen = set()
+    result = []
+    for pid in text_ids:
+        seen.add(pid)
+        result.append((pid, named.get(pid, f"Project {pid}")))
+    for pid, name in named.items():
+        if pid not in seen:
+            result.append((pid, name))
+    return result
+
+
+def get_project_name(project_id: int, db_path=DB_PATH) -> str:
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("SELECT name FROM projects WHERE id=?", (project_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else f"Project {project_id}"
+
+
+def create_project(name: str, db_path=DB_PATH) -> int:
+    """Create a new named project. Returns its ID."""
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("SELECT COALESCE(MAX(id), 0) FROM projects")
+    max_named = c.fetchone()[0]
+    c.execute("SELECT COALESCE(MAX(project), 0) FROM texts")
+    max_text = c.fetchone()[0]
+    new_id = max(max_named, max_text) + 1
+    c.execute("INSERT INTO projects (id, name) VALUES (?, ?)", (new_id, name.strip()))
+    conn.commit()
+    conn.close()
+    upload_db_to_s3(db_path, f"{S3_DB_PREFIX}/texts.db")
+    return new_id
+
+
+def rename_project(project_id: int, new_name: str, db_path=DB_PATH):
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO projects (id, name) VALUES (?, ?)", (project_id, new_name.strip()))
+    conn.commit()
+    conn.close()
+    upload_db_async(db_path, f"{S3_DB_PREFIX}/texts.db")
 
 
 def get_all_texts(user_id: Optional[int] = None, db_path: str = DB_PATH) -> list:
@@ -1445,17 +1513,18 @@ def run_streamlit_app() -> None:
                         # NEW: Track the original filename
                         source_file = uploaded_file.name
 
-                        project_num = st.number_input(
-                            "Project Number",
-                            min_value=1,
-                            max_value=999,
-                            value=1,
-                            step=1,
-                            help="Which project these scripts belong to (1, 2, 3, ...)."
-                        )
-                     
+                        _named_projs = get_all_projects_with_names()
+                        if _named_projs:
+                            _proj_labels = [name for _, name in _named_projs]
+                            _proj_ids    = [pid  for pid, _ in _named_projs]
+                            _sel_label   = st.selectbox("Assign to project", _proj_labels, key="file_project_sel")
+                            project_num  = _proj_ids[_proj_labels.index(_sel_label)]
+                        else:
+                            st.warning("No projects exist yet — create one in **Project Management** below.")
+                            project_num = None
 
-                        if st.button("Import from File", key="admin_import_btn"):
+                        if project_num and st.button("Import from File", key="admin_import_btn"):
+                            _proj_label = get_project_name(project_num)
                             count = 0
                             for line in lines:
                                 add_text(
@@ -1467,13 +1536,51 @@ def run_streamlit_app() -> None:
                                     project=project_num
                                 )
                                 count += 1
-
-                            st.success(f"Imported {count} texts from '{source_file}' into Project {project_num}")
+                            st.success(f"Imported {count} texts from '{source_file}' into **{_proj_label}**")
                             st.rerun()
 
 
                     except Exception as e:
                         st.error(f"Error reading file: {e}")
+
+                st.markdown("---")
+                st.header("Project Management")
+
+                _all_np = get_all_projects_with_names()
+
+                # --- Create new project ---
+                with st.expander("➕ Create new project", expanded=not _all_np):
+                    _new_name = st.text_input("Project name", key="new_proj_name_input",
+                                              placeholder="e.g. Gulf Arabic — Batch 1")
+                    st.markdown('<div class="btn-green">', unsafe_allow_html=True)
+                    if st.button("Create Project", key="create_proj_btn"):
+                        if _new_name.strip():
+                            _new_pid = create_project(_new_name.strip())
+                            st.success(f"Created **{_new_name.strip()}** (ID {_new_pid})")
+                            st.rerun()
+                        else:
+                            st.error("Please enter a project name.")
+                    st.markdown('</div>', unsafe_allow_html=True)
+
+                # --- Rename existing projects ---
+                if _all_np:
+                    with st.expander("✏️ Rename existing project"):
+                        _ren_labels = [name for _, name in _all_np]
+                        _ren_ids    = [pid  for pid, _ in _all_np]
+                        _ren_sel    = st.selectbox("Select project to rename", _ren_labels,
+                                                   key="rename_proj_sel")
+                        _ren_pid    = _ren_ids[_ren_labels.index(_ren_sel)]
+                        _ren_new    = st.text_input("New name", value=_ren_sel,
+                                                    key="rename_proj_input")
+                        st.markdown('<div class="btn-blue">', unsafe_allow_html=True)
+                        if st.button("Save Name", key="rename_proj_btn"):
+                            if _ren_new.strip():
+                                rename_project(_ren_pid, _ren_new.strip())
+                                st.success(f"Renamed to **{_ren_new.strip()}**")
+                                st.rerun()
+                            else:
+                                st.error("Name cannot be empty.")
+                        st.markdown('</div>', unsafe_allow_html=True)
 
                 st.markdown("---")
                 st.header("Manage Uploaded Files")
@@ -1569,23 +1676,17 @@ def run_streamlit_app() -> None:
         default_project = st.session_state.get("current_project")
         if default_project not in available_projects:
             default_project = available_projects[0]
-        selected_project = st.selectbox(
-            "Select Project",
-            options=available_projects,
-            index=available_projects.index(default_project)
-        )
+        # Show project names in the selector
+        _user_proj_names  = [get_project_name(p) for p in available_projects]
+        _default_idx = available_projects.index(default_project)
+        _sel_name = st.selectbox("Select Project", options=_user_proj_names, index=_default_idx)
+        selected_project = available_projects[_user_proj_names.index(_sel_name)]
         st.session_state["current_project"] = selected_project
-
-        # Enforce linear completion: must finish project N before N+1
-        # If user picks project > 1 but hasn't completed previous project, block
-#        if selected_project > 1 and not project_is_completed(st.session_state["username"], selected_project - 1):
-#            st.warning(f"You must complete Project {selected_project - 1} before accessing Project {selected_project}.")
-#            return
 
         # Filter texts for this project
         project_texts = [t for t in lang_texts if t[5] == selected_project]
         if not project_texts:
-            st.warning(f"No scripts found for Project {selected_project}.")
+            st.warning(f"No scripts found for **{_sel_name}**.")
             return
 
         # Make sure text_ids reflect the current project
@@ -1823,7 +1924,9 @@ def run_streamlit_app() -> None:
         st.subheader("User Management")
 
         users = get_all_users()
-        all_projects = get_all_distinct_projects()
+        _np_pairs  = get_all_projects_with_names()           # [(id, name), ...]
+        all_projects = [pid for pid, _ in _np_pairs]
+        _proj_name  = {pid: name for pid, name in _np_pairs} # id → display name
         search = st.text_input("Search users by name", key="admin_user_search")
         filtered = [u for u in users if search.lower() in u[1].lower()]
 
@@ -1844,7 +1947,8 @@ def run_streamlit_app() -> None:
                 st.markdown(f"**ID:** {uid}")
                 st.markdown(f"**Language:** `{lang or 'None'}`")
                 st.markdown(f"**Admin:** {'✅ Yes' if is_admin_flag else '❌ No'}")
-                st.markdown(f"**Datasets:** {', '.join(str(p) for p in assigned) if assigned else '_None_'}")
+                _asgn_names = [_proj_name.get(p, f"Project {p}") for p in assigned]
+            st.markdown(f"**Datasets:** {', '.join(_asgn_names) if _asgn_names else '_None_'}")
 
             with col_controls:
                 # Language assignment
@@ -1862,24 +1966,28 @@ def run_streamlit_app() -> None:
                 c_add, c_rem = st.columns(2)
                 with c_add:
                     if all_projects:
-                        add_p = st.selectbox("Add to dataset", all_projects,
-                                             key=f"add_p_{uid}_{key_suffix}")
+                        _add_labels = [_proj_name.get(p, f"Project {p}") for p in all_projects]
+                        _add_sel    = st.selectbox("Add to project", _add_labels,
+                                                   key=f"add_p_{uid}_{key_suffix}")
+                        add_p = all_projects[_add_labels.index(_add_sel)]
                         st.markdown('<div class="btn-green">', unsafe_allow_html=True)
-                        if st.button("Assign Dataset", key=f"assign_p_{uid}_{key_suffix}"):
+                        if st.button("Assign", key=f"assign_p_{uid}_{key_suffix}"):
                             assign_user_to_project(uid, add_p)
-                            st.success(f"Assigned to Project {add_p}.")
+                            st.success(f"Assigned to **{_add_sel}**.")
                             st.rerun()
                         st.markdown('</div>', unsafe_allow_html=True)
                     else:
-                        st.info("No datasets uploaded yet.")
+                        st.info("No projects exist yet.")
                 with c_rem:
                     if assigned:
-                        rem_p = st.selectbox("Remove from dataset", assigned,
-                                             key=f"rem_p_{uid}_{key_suffix}")
+                        _rem_labels = [_proj_name.get(p, f"Project {p}") for p in assigned]
+                        _rem_sel    = st.selectbox("Remove from project", _rem_labels,
+                                                   key=f"rem_p_{uid}_{key_suffix}")
+                        rem_p = assigned[_rem_labels.index(_rem_sel)]
                         st.markdown('<div class="btn-red">', unsafe_allow_html=True)
-                        if st.button("Remove Dataset", key=f"rem_btn_{uid}_{key_suffix}"):
+                        if st.button("Remove", key=f"rem_btn_{uid}_{key_suffix}"):
                             remove_user_from_project(uid, rem_p)
-                            st.success(f"Removed from Project {rem_p}.")
+                            st.success(f"Removed from **{_rem_sel}**.")
                             st.rerun()
                         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1914,7 +2022,8 @@ def run_streamlit_app() -> None:
         # --- Users grouped by project/dataset ---
         for proj in all_projects:
             proj_users = [u for u in filtered if proj in user_project_cache.get(u[0], [])]
-            with st.expander(f"📁 Project {proj} — {len(proj_users)} user(s)", expanded=False):
+            _pname = _proj_name.get(proj, f"Project {proj}")
+            with st.expander(f"📁 {_pname} — {len(proj_users)} user(s)", expanded=False):
                 if not proj_users:
                     st.info("No users assigned to this project.")
                 else:
