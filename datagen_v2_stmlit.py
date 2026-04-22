@@ -376,6 +376,7 @@ def set_user_admin(user_id: int, make_admin: bool, db_path=DB_PATH):
     c.execute("UPDATE users SET is_admin = ? WHERE id = ?", (1 if make_admin else 0, user_id))
     conn.commit()
     conn.close()
+    upload_db_to_s3(db_path, f"{S3_DB_PREFIX}/texts.db")
 
 
 def reset_user_mfa(user_id: int, db_path=DB_PATH):
@@ -385,6 +386,7 @@ def reset_user_mfa(user_id: int, db_path=DB_PATH):
     c.execute("UPDATE users SET mfa_secret = NULL WHERE id = ?", (user_id,))
     conn.commit()
     conn.close()
+    upload_db_to_s3(db_path, f"{S3_DB_PREFIX}/texts.db")
 
 
 
