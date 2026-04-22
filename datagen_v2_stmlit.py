@@ -1937,6 +1937,8 @@ def run_streamlit_app() -> None:
                      "ar-LB", "ar-PS", "ar-JO", "ar-EG", "ar-SD", "ar-TD",
                      "ar-MA", "ar-DZ", "ar-TN", "he", "fa", "ur"]
 
+        GULF_ARABIC_LOCALES = ["ar-AE", "ar-SA", "ar-QA", "ar-KW"]
+
         def _render_user(uid, uname, is_admin_flag, lang, key_suffix):
             SUPER_ADMIN = os.getenv("ADMIN_USERNAME")
             is_super_admin = (uname == SUPER_ADMIN)
@@ -1948,7 +1950,7 @@ def run_streamlit_app() -> None:
                 st.markdown(f"**Language:** `{lang or 'None'}`")
                 st.markdown(f"**Admin:** {'✅ Yes' if is_admin_flag else '❌ No'}")
                 _asgn_names = [_proj_name.get(p, f"Project {p}") for p in assigned]
-            st.markdown(f"**Datasets:** {', '.join(_asgn_names) if _asgn_names else '_None_'}")
+                st.markdown(f"**Datasets:** {', '.join(_asgn_names) if _asgn_names else '_None_'}")
 
             with col_controls:
                 # Language assignment
@@ -2019,7 +2021,47 @@ def run_streamlit_app() -> None:
                     st.success("MFA reset — user will need to re-enroll.")
                     st.rerun()
 
-        # --- Users grouped by project/dataset ---
+        # ── VIEW 1: By Language ───────────────────────────────────────────────
+        st.markdown("#### By Language")
+
+        # Index users by their language code
+        _users_by_lang: dict = {}
+        for _u in filtered:
+            _users_by_lang.setdefault(_u[3] or "__none__", []).append(_u)
+
+        # Gulf Arabic umbrella — each locale is its own sub-expander
+        _gulf_total = sum(len(_users_by_lang.get(loc, [])) for loc in GULF_ARABIC_LOCALES)
+        with st.expander(f"🌍 Gulf Arabic — {_gulf_total} user(s)", expanded=False):
+            for _loc in GULF_ARABIC_LOCALES:
+                _loc_users = _users_by_lang.get(_loc, [])
+                with st.expander(f"📍 {_loc} — {len(_loc_users)} user(s)", expanded=False):
+                    if not _loc_users:
+                        st.info(f"No users assigned to {_loc}.")
+                    for _uid, _uname, _ia, _lang in _loc_users:
+                        with st.expander(f"👤 {_uname}", expanded=False):
+                            _render_user(_uid, _uname, _ia, _lang,
+                                         f"gl{_loc.replace('-','')}{_uid}")
+
+        # Other languages
+        _other_langs = {
+            _l: _us for _l, _us in _users_by_lang.items()
+            if _l not in GULF_ARABIC_LOCALES and _l != "__none__"
+        }
+        if _other_langs:
+            _other_total = sum(len(v) for v in _other_langs.values())
+            with st.expander(f"🌐 Other Languages — {_other_total} user(s)", expanded=False):
+                for _l, _l_users in _other_langs.items():
+                    with st.expander(f"📍 {_l} — {len(_l_users)} user(s)", expanded=False):
+                        for _uid, _uname, _ia, _lang in _l_users:
+                            with st.expander(f"👤 {_uname}", expanded=False):
+                                _render_user(_uid, _uname, _ia, _lang,
+                                             f"ol{_l.replace('-','')}{_uid}")
+
+        st.markdown("---")
+
+        # ── VIEW 2: By Project / Dataset ──────────────────────────────────────
+        st.markdown("#### By Project / Dataset")
+
         for proj in all_projects:
             proj_users = [u for u in filtered if proj in user_project_cache.get(u[0], [])]
             _pname = _proj_name.get(proj, f"Project {proj}")
@@ -2029,28 +2071,26 @@ def run_streamlit_app() -> None:
                 else:
                     for uid, uname, is_admin_flag, lang in proj_users:
                         with st.expander(f"👤 {uname}", expanded=False):
-                            _render_user(uid, uname, is_admin_flag, lang, f"p{proj}")
+                            _render_user(uid, uname, is_admin_flag, lang, f"p{proj}u{uid}")
 
-        # --- Unassigned users ---
+        # Unassigned (no dataset)
         unassigned = [u for u in filtered if not user_project_cache.get(u[0], [])]
-        with st.expander(f"⚠️ Unassigned Users — {len(unassigned)} user(s)", expanded=bool(unassigned)):
+        with st.expander(f"⚠️ Unassigned — {len(unassigned)} user(s)", expanded=bool(unassigned)):
             if not unassigned:
                 st.info("All users are assigned to at least one project.")
             else:
                 for uid, uname, is_admin_flag, lang in unassigned:
                     with st.expander(f"👤 {uname}", expanded=False):
-                        _render_user(uid, uname, is_admin_flag, lang, f"u{uid}")
+                        _render_user(uid, uname, is_admin_flag, lang, f"un{uid}")
 
-        # --- Bulk Operations ---
+        # ── Bulk Operations ───────────────────────────────────────────────────
         st.markdown("---")
         with st.expander("⚙️ Bulk Operations"):
-            st.write("Set **all** users and datasets to Gulf Arabic (ar-AE) and assign every user to every dataset.")
+            st.write("Assign **all** users to **all** datasets without changing their language or locale.")
             st.markdown('<div class="btn-teal">', unsafe_allow_html=True)
-            if st.button("Run: Gulf Arabic migration (all users + all datasets → ar-AE)", key="bulk_gulf_arabic"):
+            if st.button("Assign all users to all datasets", key="bulk_assign_all"):
                 _bc = sqlite3.connect(DB_PATH)
                 _bcu = _bc.cursor()
-                _bcu.execute("UPDATE users SET chosen_language='ar-AE'")
-                _bcu.execute("UPDATE texts SET language='ar-AE'")
                 _bcu.execute("SELECT id FROM users")
                 _all_uids = [r[0] for r in _bcu.fetchall()]
                 _bcu.execute("SELECT DISTINCT project FROM texts")
@@ -2064,7 +2104,7 @@ def run_streamlit_app() -> None:
                 _bc.commit()
                 _bc.close()
                 upload_db_to_s3(DB_PATH, f"{S3_DB_PREFIX}/texts.db")
-                st.success(f"Done — {len(_all_uids)} users and {len(_all_projs)} datasets migrated to ar-AE.")
+                st.success(f"Done — {len(_all_uids)} users assigned to {len(_all_projs)} datasets.")
                 st.rerun()
             st.markdown('</div>', unsafe_allow_html=True)
 
