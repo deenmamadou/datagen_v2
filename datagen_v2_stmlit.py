@@ -332,6 +332,16 @@ def init_db(db_path: str = DB_PATH) -> None:
         )
         """
     )
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_project_assignments (
+            user_id INTEGER,
+            project INTEGER,
+            PRIMARY KEY (user_id, project),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -390,6 +400,43 @@ def reset_user_mfa(user_id: int, db_path=DB_PATH):
 
 
 
+def get_user_assigned_projects(user_id: int, db_path=DB_PATH) -> list:
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("SELECT project FROM user_project_assignments WHERE user_id=? ORDER BY project ASC", (user_id,))
+    rows = c.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+
+def assign_user_to_project(user_id: int, project: int, db_path=DB_PATH):
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO user_project_assignments (user_id, project) VALUES (?, ?)", (user_id, project))
+    conn.commit()
+    conn.close()
+    upload_db_to_s3(db_path, f"{S3_DB_PREFIX}/texts.db")
+
+
+def remove_user_from_project(user_id: int, project: int, db_path=DB_PATH):
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("DELETE FROM user_project_assignments WHERE user_id=? AND project=?", (user_id, project))
+    conn.commit()
+    conn.close()
+    upload_db_to_s3(db_path, f"{S3_DB_PREFIX}/texts.db")
+
+
+def get_all_distinct_projects(db_path=DB_PATH) -> list:
+    """Returns all project numbers in upload/insertion order."""
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("SELECT project FROM texts GROUP BY project ORDER BY MIN(id) ASC")
+    rows = c.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+
 def get_all_texts(user_id: Optional[int] = None, db_path: str = DB_PATH) -> list:
     """
     Returns rows as:
@@ -398,9 +445,9 @@ def get_all_texts(user_id: Optional[int] = None, db_path: str = DB_PATH) -> list
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
     if user_id:
-        c.execute("SELECT id, prompts, language, is_rtl, user_id, project FROM texts WHERE user_id = ?", (user_id,))
+        c.execute("SELECT id, prompts, language, is_rtl, user_id, project FROM texts WHERE user_id = ? ORDER BY id ASC", (user_id,))
     else:
-        c.execute("SELECT id, prompts, language, is_rtl, user_id, project FROM texts")
+        c.execute("SELECT id, prompts, language, is_rtl, user_id, project FROM texts ORDER BY id ASC")
     texts = c.fetchall()
     conn.close()
     return texts
@@ -1269,32 +1316,49 @@ def run_streamlit_app() -> None:
 # -----------------------------------
         st.markdown("""
             <style>
-                body {
-                    background-color: #1e1e1e !important;
+                body, .main, .main .block-container, header, footer,
+                section[data-testid="stSidebar"] {
+                    background-color: #1a1a2e !important;
+                    color: #e0e0e0 !important;
                 }
-                .main .block-container {
-                    background-color: #1e1e1e !important;
-                    color: white !important;
+                h1, h2, h3, h4, h5, h6, p, div, span, label, li {
+                    color: #e0e0e0 !important;
                 }
-                .main {
-                    background-color: #1e1e1e !important;
-                }
-                header, footer {
-                    background: #1e1e1e !important;
-                }
-                h1, h2, h3, h4, h5, h6,
-                p, div, span, label {
-                    color: white !important;
-                }
-                /* Buttons */
+                /* Default button */
                 .stButton > button {
-                    background-color: #444 !important;
-                    color: white !important;
-                    border-radius: 6px !important;
+                    background-color: #2a2a4a !important;
+                    color: #e0e0e0 !important;
+                    border: 1px solid #4a4a7a !important;
+                    border-radius: 8px !important;
                     font-weight: 600 !important;
+                    transition: background 0.2s;
                 }
                 .stButton > button:hover {
-                    background-color: #666 !important;
+                    background-color: #3a3a6a !important;
+                    border-color: #7a7aaa !important;
+                }
+                /* Submit / primary action — bright teal */
+                div[data-testid="stButton"]:has(button[kind="primary"]) button,
+                button[data-testid="baseButton-primary"] {
+                    background-color: #0d7377 !important;
+                    border-color: #14a085 !important;
+                }
+                /* Sign Out */
+                button[key="sidebar_signout_btn"] {
+                    background-color: #7a1a1a !important;
+                }
+                /* Expanders */
+                details summary {
+                    background-color: #252545 !important;
+                    border-radius: 6px !important;
+                    padding: 6px 12px !important;
+                }
+                /* Inputs */
+                .stTextInput > div > div > input,
+                .stSelectbox > div > div {
+                    background-color: #252545 !important;
+                    color: #e0e0e0 !important;
+                    border-radius: 6px !important;
                 }
             </style>
         """, unsafe_allow_html=True)
@@ -1308,7 +1372,10 @@ def run_streamlit_app() -> None:
             admin_badge = " (Admin)" if st.session_state.get("is_admin", False) else ""
             st.write(f"**Signed in as:** {st.session_state['username']}{admin_badge}")
 
-            if st.button("Sign Out", key="sidebar_signout_btn"):
+            st.markdown('<div class="btn-red">', unsafe_allow_html=True)
+            signout_clicked = st.button("Sign Out", key="sidebar_signout_btn")
+            st.markdown('</div>', unsafe_allow_html=True)
+            if signout_clicked:
 
                 persist_session_time()
                 # Save progress BEFORE logout
@@ -1491,15 +1558,29 @@ def run_streamlit_app() -> None:
             st.warning("No scripts have been assigned yet for your language.")
             return
 
-        # Determine available projects for this language
-        available_projects = sorted({t[5] for t in lang_texts})  # index 5 = project
+        # Determine available projects, filtered by admin assignments, in insertion order
+        assigned_projs = get_user_assigned_projects(st.session_state["user_id"])
+        seen_projs: set = set()
+        available_projects = []
+        for t in lang_texts:
+            p = t[5]
+            if p not in seen_projs:
+                seen_projs.add(p)
+                if not assigned_projs or p in assigned_projs:
+                    available_projects.append(p)
+
+        if not available_projects:
+            st.warning("No datasets have been assigned to you yet. Please contact your admin.")
+            return
 
         # Choose project (store in session)
-        default_project = st.session_state.get("current_project") or min(available_projects)
+        default_project = st.session_state.get("current_project")
+        if default_project not in available_projects:
+            default_project = available_projects[0]
         selected_project = st.selectbox(
             "Select Project",
             options=available_projects,
-            index=available_projects.index(default_project) if default_project in available_projects else 0
+            index=available_projects.index(default_project)
         )
         st.session_state["current_project"] = selected_project
 
@@ -1550,9 +1631,10 @@ def run_streamlit_app() -> None:
                 "<p style='color: white; font-size: 16px; margin-bottom: 10px;'>Please record yourself reading the following scripts out loud:</p>",
                 unsafe_allow_html=True
             )
-            st.subheader(
-                f"Recording {st.session_state['current_text_index'] + 1} of {len(st.session_state['text_ids'])}"
-            )
+            total = len(st.session_state["text_ids"])
+            current = st.session_state["current_text_index"] + 1
+            st.subheader(f"Recording {current} of {total}")
+            st.progress(current / total)
             st.markdown(
                 f"<div style='direction:{'rtl' if is_rtl else 'ltr'}; text-align:{'right' if is_rtl else 'left'}; font-size:34px; padding:20px; background:#2d2d2d; color:#ffffff; border-radius:10px; margin:20px 0;'>{text}</div>",
                 unsafe_allow_html=True,
@@ -1639,8 +1721,20 @@ def run_streamlit_app() -> None:
 
             col1, col2, col3 = st.columns([2, 1, 2])
             with col2:
+                if not submit_disabled:
+                    st.markdown("""
+                        <style>
+                        div[data-testid="stButton"]:last-of-type > button {
+                            background-color: #0d7377 !important;
+                            color: white !important;
+                            font-size: 18px !important;
+                            padding: 12px 0 !important;
+                            border: none !important;
+                        }
+                        </style>
+                    """, unsafe_allow_html=True)
                 submit = st.button(
-                    "Submit",
+                    "Submit Recording",
                     use_container_width=True,
                     disabled=submit_disabled
                 )
@@ -1723,84 +1817,126 @@ def run_streamlit_app() -> None:
         # -------------------------
         # ADMIN USER MANAGEMENT
         # -------------------------
+        st.markdown("""
+            <style>
+                .btn-green > button { background-color: #1a7a1a !important; color: white !important; }
+                .btn-red   > button { background-color: #8b1a1a !important; color: white !important; }
+                .btn-blue  > button { background-color: #1a3a8b !important; color: white !important; }
+                .btn-orange> button { background-color: #8b5a1a !important; color: white !important; }
+            </style>
+        """, unsafe_allow_html=True)
+
         st.subheader("User Management")
 
         users = get_all_users()
-        search = st.text_input("Search users by name")
+        all_projects = get_all_distinct_projects()
+        search = st.text_input("Search users by name", key="admin_user_search")
+        filtered = [u for u in users if search.lower() in u[1].lower()]
 
-        filtered = [
-            u for u in users
-            if search.lower() in u[1].lower()
-        ]
+        # Cache project assignments for all filtered users to avoid N+1 queries
+        user_project_cache = {u[0]: get_user_assigned_projects(u[0]) for u in filtered}
 
-        for user_id, uname, is_admin_flag, lang in filtered:
-            with st.expander(f"{uname}"):
+        lang_opts = ["None", "ar", "ar-AE", "ar-SA", "ar-QA", "ar-KW", "ar-SY",
+                     "ar-LB", "ar-PS", "ar-JO", "ar-EG", "ar-SD", "ar-TD",
+                     "ar-MA", "ar-DZ", "ar-TN", "he", "fa", "ur"]
 
-                SUPER_ADMIN = os.getenv("ADMIN_USERNAME")
-                is_super_admin = (uname == SUPER_ADMIN)
+        def _render_user(uid, uname, is_admin_flag, lang, key_suffix):
+            SUPER_ADMIN = os.getenv("ADMIN_USERNAME")
+            is_super_admin = (uname == SUPER_ADMIN)
+            assigned = user_project_cache.get(uid, [])
 
-                st.write(f"User ID: {user_id}")
-                st.write(f"Current language: {lang or 'None assigned'}")
-                st.write(f"Admin: {'Yes' if is_admin_flag else 'No'}")
+            col_info, col_controls = st.columns([1, 2])
+            with col_info:
+                st.markdown(f"**ID:** {uid}")
+                st.markdown(f"**Language:** `{lang or 'None'}`")
+                st.markdown(f"**Admin:** {'✅ Yes' if is_admin_flag else '❌ No'}")
+                st.markdown(f"**Datasets:** {', '.join(str(p) for p in assigned) if assigned else '_None_'}")
 
-                # -------------------------------
-                # Assign Language (Allowed Always)
-                # -------------------------------
-                new_lang = st.selectbox(
-                    "Assign language",
-                    ["None", "ar", "ar-AE", "ar-SA", "ar-QA", "ar-KW", "ar-SY",
-                    "ar-LB", "ar-PS", "ar-JO", "ar-EG", "ar-SD", "ar-TD",
-                    "ar-MA", "ar-DZ", "ar-TN", "he", "fa", "ur"],
-                    index=0 if lang is None else 1,
-                    key=f"lang_select_user_{user_id}"
-                )
-
-                if st.button(f"Save Language for {uname}", key=f"save_lang_{user_id}"):
-                    if new_lang == "None":
-                        save_user_language(user_id, None)
-                    else:
-                        save_user_language(user_id, new_lang)
+            with col_controls:
+                # Language assignment
+                lang_idx = lang_opts.index(lang) if lang in lang_opts else 0
+                new_lang = st.selectbox("Language", lang_opts,
+                                        index=lang_idx, key=f"lang_{uid}_{key_suffix}")
+                st.markdown('<div class="btn-blue">', unsafe_allow_html=True)
+                if st.button("Save Language", key=f"save_lang_{uid}_{key_suffix}"):
+                    save_user_language(uid, None if new_lang == "None" else new_lang)
                     st.success("Language updated.")
                     st.rerun()
+                st.markdown('</div>', unsafe_allow_html=True)
 
-                st.markdown("---")
+                st.markdown("**Dataset / Project Assignment:**")
+                c_add, c_rem = st.columns(2)
+                with c_add:
+                    if all_projects:
+                        add_p = st.selectbox("Add to dataset", all_projects,
+                                             key=f"add_p_{uid}_{key_suffix}")
+                        st.markdown('<div class="btn-green">', unsafe_allow_html=True)
+                        if st.button("Assign Dataset", key=f"assign_p_{uid}_{key_suffix}"):
+                            assign_user_to_project(uid, add_p)
+                            st.success(f"Assigned to Project {add_p}.")
+                            st.rerun()
+                        st.markdown('</div>', unsafe_allow_html=True)
+                    else:
+                        st.info("No datasets uploaded yet.")
+                with c_rem:
+                    if assigned:
+                        rem_p = st.selectbox("Remove from dataset", assigned,
+                                             key=f"rem_p_{uid}_{key_suffix}")
+                        st.markdown('<div class="btn-red">', unsafe_allow_html=True)
+                        if st.button("Remove Dataset", key=f"rem_btn_{uid}_{key_suffix}"):
+                            remove_user_from_project(uid, rem_p)
+                            st.success(f"Removed from Project {rem_p}.")
+                            st.rerun()
+                        st.markdown('</div>', unsafe_allow_html=True)
 
-                # ------------------------------------
-                # SUPER ADMIN PROTECTION (UI Controls)
-                # ------------------------------------
-                if is_super_admin:
-                    st.info("This user is the SUPER ADMIN and cannot be modified.")
-                    # ⬆ No admin toggle, no MFA reset
-                    continue
+            if is_super_admin:
+                st.info("This user is the SUPER ADMIN and cannot be modified.")
+                return
 
-                # ---------------------------
-                # Promote / Demote Admin
-                # ---------------------------
+            st.markdown("---")
+            col_adm, col_mfa = st.columns(2)
+            with col_adm:
                 if is_admin_flag:
-                    if st.button(
-                        f"Remove Admin Access from {uname}",
-                        key=f"demote_admin_{user_id}"
-                    ):
-                        set_user_admin(user_id, False)
+                    st.markdown('<div class="btn-red">', unsafe_allow_html=True)
+                    if st.button(f"Remove Admin from {uname}", key=f"demote_{uid}_{key_suffix}"):
+                        set_user_admin(uid, False)
                         st.success("User demoted from admin.")
                         st.rerun()
+                    st.markdown('</div>', unsafe_allow_html=True)
                 else:
-                    if st.button(
-                        f"Make {uname} Admin",
-                        key=f"promote_admin_{user_id}"
-                    ):
-                        set_user_admin(user_id, True)
-                        reset_user_mfa(user_id)  # force MFA setup
+                    st.markdown('<div class="btn-orange">', unsafe_allow_html=True)
+                    if st.button(f"Make {uname} Admin", key=f"promote_{uid}_{key_suffix}"):
+                        set_user_admin(uid, True)
+                        reset_user_mfa(uid)
                         st.success("User promoted to admin — MFA required on next login.")
                         st.rerun()
-
-                # ---------------------------
-                # Reset MFA (Not for super admin)
-                # ---------------------------
-                if st.button(f"Reset MFA for {uname}", key=f"reset_mfa_{user_id}"):
-                    reset_user_mfa(user_id)
+                    st.markdown('</div>', unsafe_allow_html=True)
+            with col_mfa:
+                if st.button(f"Reset MFA for {uname}", key=f"mfa_{uid}_{key_suffix}"):
+                    reset_user_mfa(uid)
                     st.success("MFA reset — user will need to re-enroll.")
                     st.rerun()
+
+        # --- Users grouped by project/dataset ---
+        for proj in all_projects:
+            proj_users = [u for u in filtered if proj in user_project_cache.get(u[0], [])]
+            with st.expander(f"📁 Project {proj} — {len(proj_users)} user(s)", expanded=False):
+                if not proj_users:
+                    st.info("No users assigned to this project.")
+                else:
+                    for uid, uname, is_admin_flag, lang in proj_users:
+                        with st.expander(f"👤 {uname}", expanded=False):
+                            _render_user(uid, uname, is_admin_flag, lang, f"p{proj}")
+
+        # --- Unassigned users ---
+        unassigned = [u for u in filtered if not user_project_cache.get(u[0], [])]
+        with st.expander(f"⚠️ Unassigned Users — {len(unassigned)} user(s)", expanded=bool(unassigned)):
+            if not unassigned:
+                st.info("All users are assigned to at least one project.")
+            else:
+                for uid, uname, is_admin_flag, lang in unassigned:
+                    with st.expander(f"👤 {uname}", expanded=False):
+                        _render_user(uid, uname, is_admin_flag, lang, f"u{uid}")
 
 
         st.markdown("---")
