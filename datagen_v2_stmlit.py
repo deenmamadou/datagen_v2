@@ -13,10 +13,13 @@ Optional (Linux):
 import os
 import random
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional, Tuple, List
 import hashlib
+import hmac as _hmac
+import base64 as _b64
+import json as _json
 import pyotp
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
@@ -24,6 +27,43 @@ import qrcode
 from io import BytesIO
 import re
 import time
+import struct
+
+_SESSION_SECRET = os.getenv("SESSION_SECRET", "datagen-internal-secret-change-in-prod")
+
+def _make_session_token(user_id: int, username: str, is_admin: bool) -> str:
+    exp = (datetime.now() + timedelta(days=7)).isoformat()
+    payload = _json.dumps({"uid": user_id, "u": username, "a": int(is_admin), "exp": exp}, separators=(",", ":"))
+    sig = _hmac.new(_SESSION_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return _b64.urlsafe_b64encode(f"{payload}||{sig}".encode()).decode()
+
+def _read_session_token(token: str) -> Optional[dict]:
+    try:
+        decoded = _b64.urlsafe_b64decode(token.encode()).decode()
+        payload, sig = decoded.rsplit("||", 1)
+        expected = _hmac.new(_SESSION_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        if not _hmac.compare_digest(sig, expected):
+            return None
+        data = _json.loads(payload)
+        if datetime.fromisoformat(data["exp"]) < datetime.now():
+            return None
+        return {"user_id": data["uid"], "username": data["u"], "is_admin": bool(data["a"])}
+    except Exception:
+        return None
+
+def _estimate_wav_duration(audio_bytes: bytes) -> Optional[float]:
+    """Parse WAV header to get duration without any S3 round-trip."""
+    try:
+        if audio_bytes[:4] != b"RIFF":
+            return None
+        channels      = struct.unpack_from("<H", audio_bytes, 22)[0]
+        sample_rate   = struct.unpack_from("<I", audio_bytes, 24)[0]
+        bits_per_samp = struct.unpack_from("<H", audio_bytes, 34)[0]
+        data_size     = struct.unpack_from("<I", audio_bytes, 40)[0]
+        bps = sample_rate * channels * (bits_per_samp // 8)
+        return data_size / bps if bps > 0 else None
+    except Exception:
+        return None
 
 
 
@@ -75,6 +115,17 @@ def upload_db_to_s3(local_path, s3_key):
         region_name=AWS_REGION,
     )
     s3.upload_file(local_path, S3_DB_BUCKET, s3_key)
+
+
+import threading as _threading
+
+def upload_db_async(local_path=None, s3_key=None):
+    """Fire-and-forget S3 DB sync — keeps the UI unblocked."""
+    if local_path is None:
+        local_path = DB_PATH
+    if s3_key is None:
+        s3_key = f"{S3_DB_PREFIX}/texts.db"
+    _threading.Thread(target=upload_db_to_s3, args=(local_path, s3_key), daemon=True).start()
 
 
 
@@ -415,7 +466,7 @@ def assign_user_to_project(user_id: int, project: int, db_path=DB_PATH):
     c.execute("INSERT OR IGNORE INTO user_project_assignments (user_id, project) VALUES (?, ?)", (user_id, project))
     conn.commit()
     conn.close()
-    upload_db_to_s3(db_path, f"{S3_DB_PREFIX}/texts.db")
+    upload_db_async(db_path, f"{S3_DB_PREFIX}/texts.db")
 
 
 def remove_user_from_project(user_id: int, project: int, db_path=DB_PATH):
@@ -424,7 +475,7 @@ def remove_user_from_project(user_id: int, project: int, db_path=DB_PATH):
     c.execute("DELETE FROM user_project_assignments WHERE user_id=? AND project=?", (user_id, project))
     conn.commit()
     conn.close()
-    upload_db_to_s3(db_path, f"{S3_DB_PREFIX}/texts.db")
+    upload_db_async(db_path, f"{S3_DB_PREFIX}/texts.db")
 
 
 def get_all_distinct_projects(db_path=DB_PATH) -> list:
@@ -531,9 +582,7 @@ def save_user_language(user_id, language, db_path=DB_PATH):
     c.execute("UPDATE users SET chosen_language=? WHERE id=?", (language, user_id))
     conn.commit()
     conn.close()
-
-    # 🚀 NEW: persist updated DB to S3
-    upload_db_to_s3(DB_PATH, f"{S3_DB_PREFIX}/texts.db")
+    upload_db_async(DB_PATH, f"{S3_DB_PREFIX}/texts.db")
 
 def ensure_user_dirs(user_id):
     base = f"recordings/user_{user_id}"
@@ -681,8 +730,7 @@ def save_progress(user):
     if project is not None:
         save_project_progress(user, project, step, bool(completed_flag))
 
-    # Upload DB to S3 (save_progress was doing this already; we keep it)
-    upload_db_to_s3(PROGRESS_DB_PATH, f"{S3_DB_PREFIX}/user_progress_v2.db")
+    upload_db_async(PROGRESS_DB_PATH, f"{S3_DB_PREFIX}/user_progress_v2.db")
 
 
 
@@ -821,21 +869,11 @@ def save_recording(
     audio_file_path: str,
     status: str = "saved",
     db_path: str = DB_PATH,
+    duration_seconds: Optional[float] = None,
 ) -> int:
-
-    duration_seconds = None
-    try:
-        if audio_file_path.startswith("s3://"):
-            size = get_s3_file_size(audio_file_path)
-            duration_seconds = estimate_wav_duration_seconds(size)
-    except Exception:
-        pass
-
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
-
     user_id = st.session_state.get("user_id")
-
     try:
         c.execute(
             """
@@ -843,23 +881,17 @@ def save_recording(
                 (text_id, audio_file_path, hoppepper_job_id, status, duration_seconds, user_id)
             VALUES (?, ?, NULL, ?, ?, ?)
             """,
-            (text_id, audio_file_path, status, duration_seconds, user_id)
+            (text_id, audio_file_path, status, duration_seconds, user_id),
         )
     except sqlite3.OperationalError:
-        # Backward compatibility
         c.execute(
-            """
-            INSERT INTO recordings (text_id, audio_file_path, hoppepper_job_id, status)
-            VALUES (?, ?, NULL, ?)
-            """,
+            "INSERT INTO recordings (text_id, audio_file_path, hoppepper_job_id, status) VALUES (?, ?, NULL, ?)",
             (text_id, audio_file_path, status),
         )
-
     conn.commit()
     rid = c.lastrowid
     conn.close()
-
-    upload_db_to_s3(DB_PATH, f"{S3_DB_PREFIX}/texts.db")
+    upload_db_async(DB_PATH, f"{S3_DB_PREFIX}/texts.db")
     return rid
 
 
@@ -1010,12 +1042,28 @@ def run_streamlit_app() -> None:
         "username": None,
         "authenticated": False,
         "is_admin": False,
-        "mfa_stage": None,              # "enroll" or "verify"
+        "mfa_stage": None,
         "pending_mfa_secret": None,
         "pending_mfa_user_id": None,
         "pending_mfa_username": None,
     }.items():
         st.session_state.setdefault(key, val)
+
+    # ── Session persistence across browser refreshes ──────────────────────────
+    # On fresh page load session_state is empty; restore from the HMAC-signed
+    # token we stored in the URL query string (?s=...) at login time.
+    if not st.session_state.get("authenticated"):
+        _raw = st.query_params.get("s", "")
+        if _raw:
+            _sd = _read_session_token(_raw)
+            if _sd:
+                st.session_state["user_id"]          = _sd["user_id"]
+                st.session_state["username"]         = _sd["username"]
+                st.session_state["is_admin"]         = _sd["is_admin"]
+                st.session_state["authenticated"]    = True
+                st.session_state["session_start_ts"] = time.time()
+            else:
+                st.query_params.clear()  # expired / tampered
 
     if (
         st.session_state.get("authenticated")
@@ -1023,9 +1071,6 @@ def run_streamlit_app() -> None:
     ):
         st.session_state["session_start_ts"] = time.time()
 
-
-
-    # Authentication UI
     # Authentication UI
     if not st.session_state.get("authenticated", False):
 
@@ -1061,6 +1106,7 @@ def run_streamlit_app() -> None:
                             st.session_state["authenticated"] = True
                             st.session_state["session_start_ts"] = time.time()
                             st.session_state["is_admin"] = True
+                            st.query_params["s"] = _make_session_token(user_id, username, True)
                             st.success("Signed in — MFA not required this time.")
                             st.rerun()
 
@@ -1109,7 +1155,7 @@ def run_streamlit_app() -> None:
                         st.session_state["authenticated"] = True
                         st.session_state["session_start_ts"] = time.time()
                         st.session_state["is_admin"] = False
-
+                        st.query_params["s"] = _make_session_token(user_id, username, False)
 
                         # Load language + progress as you already do
                         user_lang = get_user_language(user_id)
@@ -1158,10 +1204,8 @@ def run_streamlit_app() -> None:
                             st.session_state["authenticated"] = True
                             st.session_state["session_start_ts"] = time.time()
                             st.session_state["is_admin"] = False
-
-                            # 💥 CRITICAL: Mark new user as having no chosen language yet
                             st.session_state["chosen_language"] = None
-
+                            st.query_params["s"] = _make_session_token(user_id, new_username, False)
                             st.success("Account created successfully!")
                             st.rerun()
 
@@ -1230,11 +1274,13 @@ def run_streamlit_app() -> None:
                 update_mfa_timestamp(user_id)
 
                 # Log admin in
+                _uname = st.session_state["pending_mfa_username"]
                 st.session_state["user_id"] = user_id
-                st.session_state["username"] = st.session_state["pending_mfa_username"]
+                st.session_state["username"] = _uname
                 st.session_state["authenticated"] = True
                 st.session_state["session_start_ts"] = time.time()
                 st.session_state["is_admin"] = True
+                st.query_params["s"] = _make_session_token(user_id, _uname, True)
 
                 # Clear MFA temp state
                 st.session_state["mfa_stage"] = None
@@ -1279,16 +1325,15 @@ def run_streamlit_app() -> None:
                 uid = st.session_state["pending_mfa_user_id"]
                 st.session_state["user_id"] = uid
 
-                # Correct MFA timestamp update
                 update_mfa_timestamp(uid)
-                upload_db_to_s3(DB_PATH, f"{S3_DB_PREFIX}/texts.db")
+                upload_db_async(DB_PATH, f"{S3_DB_PREFIX}/texts.db")
 
-
-                st.session_state["username"] = st.session_state["pending_mfa_username"]
+                _uname = st.session_state["pending_mfa_username"]
+                st.session_state["username"] = _uname
                 st.session_state["authenticated"] = True
                 st.session_state["session_start_ts"] = time.time()
                 st.session_state["is_admin"] = True
-
+                st.query_params["s"] = _make_session_token(uid, _uname, True)
 
                 # Clear MFA temp state
                 st.session_state["mfa_stage"] = None
@@ -1316,50 +1361,22 @@ def run_streamlit_app() -> None:
 # -----------------------------------
         st.markdown("""
             <style>
-                body, .main, .main .block-container, header, footer,
-                section[data-testid="stSidebar"] {
-                    background-color: #1a1a2e !important;
-                    color: #e0e0e0 !important;
-                }
-                h1, h2, h3, h4, h5, h6, p, div, span, label, li {
-                    color: #e0e0e0 !important;
-                }
-                /* Default button */
+                body { background-color: #1e1e1e !important; }
+                .main .block-container { background-color: #1e1e1e !important; color: white !important; }
+                .main { background-color: #1e1e1e !important; }
+                header, footer { background: #1e1e1e !important; }
+                h1,h2,h3,h4,h5,h6,p,div,span,label { color: white !important; }
                 .stButton > button {
-                    background-color: #2a2a4a !important;
-                    color: #e0e0e0 !important;
-                    border: 1px solid #4a4a7a !important;
-                    border-radius: 8px !important;
-                    font-weight: 600 !important;
-                    transition: background 0.2s;
+                    background-color: #444 !important; color: white !important;
+                    border-radius: 6px !important; font-weight: 600 !important;
                 }
-                .stButton > button:hover {
-                    background-color: #3a3a6a !important;
-                    border-color: #7a7aaa !important;
-                }
-                /* Submit / primary action — bright teal */
-                div[data-testid="stButton"]:has(button[kind="primary"]) button,
-                button[data-testid="baseButton-primary"] {
-                    background-color: #0d7377 !important;
-                    border-color: #14a085 !important;
-                }
-                /* Sign Out */
-                button[key="sidebar_signout_btn"] {
-                    background-color: #7a1a1a !important;
-                }
-                /* Expanders */
-                details summary {
-                    background-color: #252545 !important;
-                    border-radius: 6px !important;
-                    padding: 6px 12px !important;
-                }
-                /* Inputs */
-                .stTextInput > div > div > input,
-                .stSelectbox > div > div {
-                    background-color: #252545 !important;
-                    color: #e0e0e0 !important;
-                    border-radius: 6px !important;
-                }
+                .stButton > button:hover { background-color: #666 !important; }
+                /* colored button helpers */
+                .btn-green > button { background-color: #1a6b1a !important; }
+                .btn-red   > button { background-color: #7a1a1a !important; }
+                .btn-blue  > button { background-color: #1a3a8b !important; }
+                .btn-orange> button { background-color: #8b5a1a !important; }
+                .btn-teal  > button { background-color: #0d7377 !important; }
             </style>
         """, unsafe_allow_html=True)
 
@@ -1382,7 +1399,7 @@ def run_streamlit_app() -> None:
                 if st.session_state.get("username"):
                     save_progress(st.session_state["username"])
 
-                # Reset state
+                # Clear session
                 st.session_state["authenticated"] = False
                 st.session_state["user_id"] = None
                 st.session_state["username"] = None
@@ -1390,6 +1407,7 @@ def run_streamlit_app() -> None:
                 st.session_state["text_ids"] = []
                 st.session_state["current_text_index"] = 0
                 st.session_state["chosen_language"] = None
+                st.query_params.clear()  # invalidate persistent session token
 
                 st.rerun()
 
@@ -1508,32 +1526,6 @@ def run_streamlit_app() -> None:
                 else:
                     st.info(f"Language: **{st.session_state['chosen_language']}**")
                     
-        # -----------------------------------
-        # DARK THEME (applies only after login)
-        # -----------------------------------
-        st.markdown("""
-            <style>
-                .main .block-container {
-                    background-color: #1e1e1e !important;
-                    color: white !important;
-                }
-                .main {
-                    background-color: #1e1e1e !important;
-                }
-                h1, h2, h3, h4, h5, h6,
-                p, div, span {
-                    color: white !important;
-                }
-                .stMarkdown, .stText {
-                    color: white !important;
-                }
-                /* Buttons */
-                .stButton > button {
-                    border-radius: 6px !important;
-                    font-weight: 600 !important;
-                }
-            </style>
-        """, unsafe_allow_html=True)
 
 
     # ---- FIRST-TIME LANGUAGE + PROJECT SELECTION (MAIN AREA) ----
@@ -1750,12 +1742,14 @@ def run_streamlit_app() -> None:
                 audio_key = f"{user_lang}/{username}/audio/{base_name}.wav"
                 text_key  = f"{user_lang}/{username}/transcripts/{base_name}.txt"
 
-                # Start async upload so UI does NOT freeze
+                # Calculate duration from bytes now (avoids S3 HEAD later)
+                _dur = _estimate_wav_duration(audio_bytes)
+
+                # Async audio upload — UI never waits for S3
                 upload_async(audio_bytes, audio_key, text_key, text)
 
-                # Save the *expected* S3 URI (UI doesn't wait for upload to finish)
                 audio_s3_uri = f"s3://{AWS_BUCKET_NAME}/{audio_key}"
-                save_recording(text_id, audio_s3_uri, "saved")
+                save_recording(text_id, audio_s3_uri, "saved", duration_seconds=_dur)
 
                 # Remember SHA256 instead of raw bytes
                 st.session_state["last_submitted_audio_hash"] = hashlib.sha256(audio_bytes).hexdigest()
@@ -1938,6 +1932,32 @@ def run_streamlit_app() -> None:
                     with st.expander(f"👤 {uname}", expanded=False):
                         _render_user(uid, uname, is_admin_flag, lang, f"u{uid}")
 
+        # --- Bulk Operations ---
+        st.markdown("---")
+        with st.expander("⚙️ Bulk Operations"):
+            st.write("Set **all** users and datasets to Gulf Arabic (ar-AE) and assign every user to every dataset.")
+            st.markdown('<div class="btn-teal">', unsafe_allow_html=True)
+            if st.button("Run: Gulf Arabic migration (all users + all datasets → ar-AE)", key="bulk_gulf_arabic"):
+                _bc = sqlite3.connect(DB_PATH)
+                _bcu = _bc.cursor()
+                _bcu.execute("UPDATE users SET chosen_language='ar-AE'")
+                _bcu.execute("UPDATE texts SET language='ar-AE'")
+                _bcu.execute("SELECT id FROM users")
+                _all_uids = [r[0] for r in _bcu.fetchall()]
+                _bcu.execute("SELECT DISTINCT project FROM texts")
+                _all_projs = [r[0] for r in _bcu.fetchall()]
+                for _buid in _all_uids:
+                    for _bproj in _all_projs:
+                        _bcu.execute(
+                            "INSERT OR IGNORE INTO user_project_assignments (user_id, project) VALUES (?, ?)",
+                            (_buid, _bproj),
+                        )
+                _bc.commit()
+                _bc.close()
+                upload_db_to_s3(DB_PATH, f"{S3_DB_PREFIX}/texts.db")
+                st.success(f"Done — {len(_all_uids)} users and {len(_all_projs)} datasets migrated to ar-AE.")
+                st.rerun()
+            st.markdown('</div>', unsafe_allow_html=True)
 
         st.markdown("---")
         st.subheader("All Recordings")
